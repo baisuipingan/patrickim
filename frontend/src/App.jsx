@@ -435,7 +435,7 @@ function ChatApp() {
         }
 
         // 设置连接状态为连接中
-        setConnectionStatus(prev => ({ ...prev, [remoteId]: 'connecting' }));
+        setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'connecting' } }));
         
         // 设置连接超时（30秒）
         connectionTimeoutRef.current[remoteId] = setTimeout(() => {
@@ -449,7 +449,7 @@ function ChatApp() {
                 delete peersRef.current[remoteId];
                 
                 // 更新连接状态为断开
-                setConnectionStatus(prev => ({ ...prev, [remoteId]: 'disconnected' }));
+                setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
                 
                 // 如果我们是发起方，尝试重新连接
                 if (initiator) {
@@ -513,7 +513,7 @@ function ChatApp() {
                         }
                         
                         // 更新连接状态
-                        setConnectionStatus(prev => ({ ...prev, [remoteId]: 'disconnected' }));
+                        setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
                         
                         // 如果我们是发起方，尝试重新连接
                         if (initiator) {
@@ -536,7 +536,7 @@ function ChatApp() {
             
             if (state === 'failed') {
                 log(`Connection failed with ${remoteId}`);
-                setConnectionStatus(prev => ({ ...prev, [remoteId]: 'disconnected' }));
+                setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
             }
         };
 
@@ -563,8 +563,55 @@ function ChatApp() {
                 clearTimeout(connectionTimeoutRef.current[remoteId]);
                 delete connectionTimeoutRef.current[remoteId];
             }
-            // 更新连接状态为已连接
-            setConnectionStatus(prev => ({ ...prev, [remoteId]: 'connected' }));
+            // 更新连接状态为已连接（先设置基本状态）
+            setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'connected' } }));
+            
+            // 检测网络连接类型（LAN还是WAN）
+            const pc = peersRef.current[remoteId]?.pc;
+            if (pc) {
+                pc.getStats().then(stats => {
+                    stats.forEach(report => {
+                        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                            // 获取本地和远程候选者信息
+                            stats.forEach(candidate => {
+                                if (candidate.id === report.localCandidateId) {
+                                    const localType = candidate.candidateType;
+                                    const localAddress = candidate.address || candidate.ip;
+                                    
+                                    stats.forEach(remote => {
+                                        if (remote.id === report.remoteCandidateId) {
+                                            const remoteType = remote.candidateType;
+                                            const remoteAddress = remote.address || remote.ip;
+                                            
+                                            // 判断是否为局域网连接
+                                            // host类型表示直连（局域网），srflx表示STUN穿透（公网），relay表示TURN中继
+                                            const isLAN = localType === 'host' && remoteType === 'host';
+                                            const networkType = isLAN ? 'lan' : 'wan';
+                                            
+                                            log(`${remoteId} 连接类型: ${networkType.toUpperCase()} (${localType} -> ${remoteType})`);
+                                            
+                                            // 更新连接状态，包含网络类型信息
+                                            setConnectionStatus(prev => ({
+                                                ...prev,
+                                                [remoteId]: {
+                                                    status: 'connected',
+                                                    networkType,
+                                                    localAddress,
+                                                    remoteAddress,
+                                                    localType,
+                                                    remoteType
+                                                }
+                                            }));
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }).catch(err => {
+                    console.error('Failed to get connection stats:', err);
+                });
+            }
         };
         
         dc.onclose = () => {
@@ -575,7 +622,7 @@ function ChatApp() {
                 delete connectionTimeoutRef.current[remoteId];
             }
             // 更新连接状态为已断开
-            setConnectionStatus(prev => ({ ...prev, [remoteId]: 'disconnected' }));
+            setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
             // 清理该用户的事件队列
             delete eventQueueRef.current[remoteId];
         };
@@ -1044,10 +1091,12 @@ function ChatApp() {
                         {[...onlineUsers].map(user => {
                             if (user === myIdRef.current) return null; // Don't show myself in private chat list
                             const displayName = getDisplayName(user);
-                            const status = connectionStatus[user] || 'connecting';
+                            const connInfo = connectionStatus[user] || { status: 'connecting' };
+                            const status = connInfo.status || 'connecting';
+                            const networkType = connInfo.networkType; // 'lan' or 'wan'
                             const statusConfig = {
                                 connecting: { color: '#f59e0b', text: '连接中' },
-                                connected: { color: '#10b981', text: '已连接' },
+                                connected: { color: '#10b981', text: networkType === 'lan' ? '🏠局域网' : '🌐公网' },
                                 disconnected: { color: '#9ca3af', text: '离线' }
                             };
                             const currentStatus = statusConfig[status];
