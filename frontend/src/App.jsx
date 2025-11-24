@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Component } from 'react';
+import React, { useState, useEffect, useRef, Component } from 'react';
 import CryptoJS from 'crypto-js';
 import { formatSize, formatTime, formatSpeed } from './utils/formatters';
 import { isModernFileAPISupported } from './utils/fileUtils';
@@ -60,6 +60,15 @@ function ChatApp() {
     const [connectionStatus, setConnectionStatus] = useState({}); // id -> 'connecting' | 'connected' | 'disconnected'
     const [isPrivate, setIsPrivate] = useState(false); // 是否创建私有房间
     const [unreadCounts, setUnreadCounts] = useState({}); // 未读消息计数 { userId: count }
+    const [lastReadTime, setLastReadTime] = useState(() => {
+        // 从 localStorage 加载已读时间
+        try {
+            const stored = localStorage.getItem(`lastReadTime_${myIdRef.current}`);
+            return stored ? JSON.parse(stored) : {};
+        } catch {
+            return {};
+        }
+    }); // 记录每个聊天窗口的最后已读时间 { chatKey: timestamp }
     const isModernAPISupported = isModernFileAPISupported();
     
     // Refs for mutable objects
@@ -107,22 +116,37 @@ function ChatApp() {
     const blobUrlsRef = useRef(new Set());
     
     const chatBoxRef = useRef(null);
+    const firstUnreadRef = useRef(null); // 第一条未读消息的 ref
     
-    // Auto-scroll to bottom
+    // 保存 lastReadTime 到 localStorage
     useEffect(() => {
-        if (chatBoxRef.current) {
-            chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
+        if (Object.keys(lastReadTime).length > 0) {
+            localStorage.setItem(`lastReadTime_${myIdRef.current}`, JSON.stringify(lastReadTime));
         }
-    }, [chatHistory]);
+    }, [lastReadTime]);
     
     const log = (msg) => setLogs(prev => [...prev, msg]);
     
     // 添加聊天消息并自动保存到 localStorage
     const addChat = (msg) => {
+        // 添加时间戳（如果没有）
+        const messageWithTime = {
+            ...msg,
+            timestamp: msg.timestamp || Date.now()
+        };
+        
         setChatHistory(prev => {
-            const newHistory = [...prev, msg];
+            const newHistory = [...prev, messageWithTime];
             // 异步保存，不阻塞UI
             setTimeout(() => saveChatHistory(newHistory, currentRoom), 0);
+            
+            // 滚动到底部（如果是当前活跃窗口的消息）
+            setTimeout(() => {
+                if (chatBoxRef.current) {
+                    chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
+                }
+            }, 0);
+            
             return newHistory;
         });
         
@@ -158,9 +182,20 @@ function ChatApp() {
         }
     };
     
-    // 切换聊天窗口（清零未读计数）
+    // 切换聊天窗口（清零未读计数并记录已读时间）
     const switchToUser = (userId) => {
+        // 记录当前窗口的已读时间
+        const currentKey = activeUser === null ? '__global__' : activeUser;
+        setLastReadTime(prev => ({
+            ...prev,
+            [currentKey]: Date.now()
+        }));
+        
+        // 重置第一条未读消息的 ref
+        firstUnreadRef.current = null;
+        
         setActiveUser(userId);
+        
         // 清零该聊天窗口的未读计数
         const key = userId === null ? '__global__' : userId;
         setUnreadCounts(prev => {
@@ -168,6 +203,34 @@ function ChatApp() {
             delete newCounts[key];
             return newCounts;
         });
+        
+        // 更新该窗口的已读时间
+        setLastReadTime(prev => ({
+            ...prev,
+            [key]: Date.now()
+        }));
+        
+        // 滚动到未读消息或底部（延迟以等待DOM更新）
+        setTimeout(() => scrollToUnreadOrBottom(key), 150);
+    };
+    
+    // 智能滚动：滚动到第一条未读消息或底部
+    const scrollToUnreadOrBottom = (chatKey) => {
+        if (!chatBoxRef.current) return;
+        
+        // 如果有第一条未读消息的 ref，滚动到那里
+        if (firstUnreadRef.current) {
+            firstUnreadRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            // 稍微向上偏移一点，让"未读消息"标签更明显
+            setTimeout(() => {
+                if (chatBoxRef.current) {
+                    chatBoxRef.current.scrollTop -= 20;
+                }
+            }, 200);
+        } else {
+            // 否则滚动到底部
+            chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
+        }
     };
     
     // getDisplayName 在下面定义（需要访问 nickname 状态）
@@ -1327,15 +1390,50 @@ function ChatApp() {
 
                     {/* Messages */}
                     <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-gray-50" ref={chatBoxRef}>
-                        {filteredChatHistory.map((c, i) => (
-                            <ChatMessage
-                                key={i}
-                                message={c}
-                                displayName={getDisplayName(c.from)}
-                                isMine={c.from === 'Me'}
-                                onImageClick={setPreviewImage}
-                            />
-                        ))}
+                        {filteredChatHistory.map((c, i) => {
+                            // 计算是否是第一条未读消息
+                            const chatKey = activeUser === null ? '__global__' : activeUser;
+                            const lastRead = lastReadTime[chatKey] || 0;
+                            const isUnread = c.timestamp && c.timestamp > lastRead && c.from !== 'Me' && c.from !== myIdRef.current;
+                            
+                            // 检查这是否是第一条未读消息（往前找第一个非自己发送的消息）
+                            let isFirstUnread = false;
+                            if (isUnread) {
+                                // 往前找，看前面是否还有未读消息
+                                let hasUnreadBefore = false;
+                                for (let j = i - 1; j >= 0; j--) {
+                                    const prev = filteredChatHistory[j];
+                                    // 跳过自己发送的消息
+                                    if (prev.from === 'Me' || prev.from === myIdRef.current) continue;
+                                    // 找到一条非自己的消息，检查是否已读
+                                    if (prev.timestamp && prev.timestamp > lastRead) {
+                                        hasUnreadBefore = true;
+                                    }
+                                    break;
+                                }
+                                isFirstUnread = !hasUnreadBefore;
+                            }
+                            
+                            return (
+                                <React.Fragment key={i}>
+                                    {isFirstUnread && (
+                                        <div ref={firstUnreadRef} className="flex items-center gap-3 my-2">
+                                            <div className="flex-1 h-px bg-red-300"></div>
+                                            <span className="text-xs font-medium text-red-500 px-2 py-1 bg-red-50 rounded-full">
+                                                未读消息
+                                            </span>
+                                            <div className="flex-1 h-px bg-red-300"></div>
+                                        </div>
+                                    )}
+                                    <ChatMessage
+                                        message={c}
+                                        displayName={getDisplayName(c.from)}
+                                        isMine={c.from === 'Me'}
+                                        onImageClick={setPreviewImage}
+                                    />
+                                </React.Fragment>
+                            );
+                        })}
                     </div>
                     
                     {/* File Progress Bars */}
