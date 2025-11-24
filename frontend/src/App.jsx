@@ -16,6 +16,7 @@ import { Badge } from './components/ui/badge';
 import { Avatar, AvatarFallback } from './components/ui/avatar';
 import { Menu, Globe, Edit2, X, Trash2 } from 'lucide-react';
 import { cn } from './lib/utils';
+import { ThemeProvider } from './components/ThemeProvider';
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -1246,15 +1247,15 @@ function ChatApp() {
     }
 
     return (
-        <div className="w-full h-screen bg-gray-50">
+        <div className="w-full h-screen bg-gray-50 dark:bg-zinc-950 transition-colors duration-300">
             <div className="w-full h-full flex relative">
                 {/* Left Side: User List */}
                 <div className={cn(
-                    "w-full md:w-56 lg:w-64 bg-white border-r flex flex-col transition-transform duration-300 z-20",
+                    "w-full md:w-56 lg:w-64 bg-white dark:bg-zinc-900 border-r dark:border-zinc-800 flex flex-col transition-all duration-300 z-20",
                     "md:translate-x-0 md:relative",
                     isSidebarOpen ? "translate-x-0 fixed inset-0" : "-translate-x-full fixed md:relative"
                 )}>
-                    <div className="px-3 sm:px-4 py-3 sm:py-4 border-b">
+                    <div className="px-3 sm:px-4 py-3 sm:py-4 border-b dark:border-zinc-800">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <div className="w-2 h-2 rounded-full bg-green-500"></div>
@@ -1277,10 +1278,10 @@ function ChatApp() {
                             className={cn(
                                 "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                 activeUser === null 
-                                    ? "bg-gray-900 text-white" 
+                                    ? "bg-gray-900 text-white dark:bg-zinc-50 dark:text-zinc-900" 
                                     : unreadCounts['__global__'] > 0
-                                        ? "hover:bg-gray-100 text-gray-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
-                                        : "hover:bg-gray-100 text-gray-900"
+                                        ? "hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-900 dark:text-zinc-100 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                        : "hover:bg-gray-100 dark:hover:bg-zinc-800 text-gray-900 dark:text-zinc-100"
                             )}
                             onClick={() => {
                                 switchToUser(null);
@@ -1290,10 +1291,10 @@ function ChatApp() {
                             <div className={cn(
                                 "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
                                 activeUser === null 
-                                    ? "bg-white/10" 
-                                    : "bg-gray-100"
+                                    ? "bg-white/10 dark:bg-black/10" 
+                                    : "bg-gray-100 dark:bg-zinc-800"
                             )}>
-                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white" : "text-gray-600")} />
+                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white dark:text-zinc-900" : "text-gray-600 dark:text-zinc-400")} />
                             </div>
                             <div className="flex flex-col flex-1 min-w-0">
                                 <span className="text-sm font-medium truncate">
@@ -1301,7 +1302,7 @@ function ChatApp() {
                                 </span>
                                 <span className={cn(
                                     "text-xs",
-                                    activeUser === null ? "text-white/70" : "text-gray-500"
+                                    activeUser === null ? "text-white/70 dark:text-zinc-900/70" : "text-gray-500 dark:text-zinc-400"
                                 )}>
                                     Everyone
                                 </span>
@@ -1395,9 +1396,9 @@ function ChatApp() {
                 )}
 
                 {/* Right Side: Chat */}
-                <div className="flex-1 flex flex-col bg-white">
+                <div className="flex-1 flex flex-col bg-white dark:bg-zinc-950 transition-colors duration-300">
                     {/* Header */}
-                    <div className="px-3 sm:px-4 py-2.5 sm:py-3 border-b flex items-center gap-2 sm:gap-3 bg-white">
+                    <div className="px-3 sm:px-4 py-2.5 sm:py-3 border-b dark:border-zinc-800 flex items-center gap-2 sm:gap-3 bg-white dark:bg-zinc-900 transition-colors duration-300">
                         <Button 
                             variant="ghost" 
                             size="icon" 
@@ -1464,7 +1465,7 @@ function ChatApp() {
                     </div>
 
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-gray-50" ref={chatBoxRef}>
+                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-gray-50 dark:bg-zinc-950 transition-colors duration-300" ref={chatBoxRef}>
                         {filteredChatHistory.map((c, i) => {
                             // 计算是否是第一条未读消息
                             const chatKey = activeUser === null ? '__global__' : activeUser;
@@ -1526,7 +1527,7 @@ function ChatApp() {
                     
                     {/* File Progress Bars */}
                     {Object.keys(fileProgress).length > 0 && (
-                        <div className="px-4 py-3 border-t bg-white">
+                        <div className="px-4 py-3 border-t dark:border-zinc-800 bg-white dark:bg-zinc-900">
                             {Object.entries(fileProgress).map(([id, p]) => {
                                 // 对于上传进度条，id格式是 up-{fileId}-{targetId}，需要提取 fileId 和 targetId
                                 const isUpload = id.startsWith('up-');
@@ -1739,8 +1740,10 @@ function ChatApp() {
 
 export default function App() {
     return (
-        <ErrorBoundary>
-            <ChatApp />
-        </ErrorBoundary>
+        <ThemeProvider defaultTheme="system" storageKey="vite-ui-theme">
+            <ErrorBoundary>
+                <ChatApp />
+            </ErrorBoundary>
+        </ThemeProvider>
     );
 }
