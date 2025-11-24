@@ -26,6 +26,7 @@ type Room struct {
 	ID        string             // 房间唯一标识
 	Clients   map[string]*Client // 房间内的客户端
 	CreatedAt time.Time          // 房间创建时间
+	IsPrivate bool               // 是否为私有房间（不在房间列表中显示）
 	mu        sync.RWMutex       // 保护 Clients map 的读写锁
 }
 
@@ -50,11 +51,12 @@ type Message struct {
 //     所有写入操作都投递到 send channel，由 writePump 串行处理
 //  2. Hub 引用用于在连接断开时通知中央调度器
 type Client struct {
-	ID     string          // 客户端唯一标识
-	RoomID string          // 所属房间ID
-	Conn   *websocket.Conn // WebSocket 连接对象
-	Hub    *Hub            // 指向中央 Hub 的引用
-	send   chan Message    // 发送消息的缓冲 channel，容量 256
+	ID        string          // 客户端唯一标识
+	RoomID    string          // 所属房间ID
+	IsPrivate bool            // 是否为私有房间
+	Conn      *websocket.Conn // WebSocket 连接对象
+	Hub       *Hub            // 指向中央 Hub 的引用
+	send      chan Message    // 发送消息的缓冲 channel，容量 256
 }
 
 // Hub 是中央消息调度器
@@ -95,7 +97,7 @@ func NewHub() *Hub {
 }
 
 // getOrCreateRoom 获取或创建房间
-func (h *Hub) getOrCreateRoom(roomID string) *Room {
+func (h *Hub) getOrCreateRoom(roomID string, isPrivate bool) *Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -105,9 +107,14 @@ func (h *Hub) getOrCreateRoom(roomID string) *Room {
 			ID:        roomID,
 			Clients:   make(map[string]*Client),
 			CreatedAt: time.Now(),
+			IsPrivate: isPrivate,
 		}
 		h.rooms[roomID] = room
-		log.Printf("Created room: %s", roomID)
+		privateStr := ""
+		if isPrivate {
+			privateStr = " (private)"
+		}
+		log.Printf("Created room: %s%s", roomID, privateStr)
 	}
 	return room
 }
@@ -122,8 +129,8 @@ func (h *Hub) Run() {
 		select {
 		// ====== 处理客户端注册 ======
 		case client := <-h.register:
-			// 获取或创建房间
-			room := h.getOrCreateRoom(client.RoomID)
+			// 获取或创建房间（从 client 中读取 IsPrivate 信息）
+			room := h.getOrCreateRoom(client.RoomID, client.IsPrivate)
 
 			room.mu.Lock()
 			// 如果 ID 已存在，关闭旧连接
@@ -413,13 +420,17 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		roomID = "default"
 	}
 
+	// 从 URL 参数获取是否为私有房间
+	isPrivate := r.URL.Query().Get("private") == "true"
+
 	// 创建客户端对象
 	client := &Client{
-		ID:     id,
-		RoomID: roomID,
-		Conn:   conn,
-		Hub:    hub,
-		send:   make(chan Message, 256), // 缓冲 256 条消息
+		ID:        id,
+		RoomID:    roomID,
+		IsPrivate: isPrivate,
+		Conn:      conn,
+		Hub:       hub,
+		send:      make(chan Message, 256), // 缓冲 256 条消息
 	}
 	// 向 Hub 注册该客户端
 	hub.register <- client
@@ -435,15 +446,21 @@ type RoomInfo struct {
 	ClientCount int       `json:"clientCount"`
 	Clients     []string  `json:"clients"`
 	CreatedAt   time.Time `json:"createdAt"`
+	IsPrivate   bool      `json:"isPrivate"`
 }
 
-// getRooms 返回所有房间列表
+// getRooms 返回所有房间列表（过滤私有房间）
 func getRooms(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	hub.mu.RLock()
 	defer hub.mu.RUnlock()
 
 	rooms := make([]RoomInfo, 0, len(hub.rooms))
 	for _, room := range hub.rooms {
+		// 跳过私有房间
+		if room.IsPrivate {
+			continue
+		}
+
 		room.mu.RLock()
 		clientIDs := make([]string, 0, len(room.Clients))
 		for id := range room.Clients {
@@ -454,6 +471,7 @@ func getRooms(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			ClientCount: len(room.Clients),
 			Clients:     clientIDs,
 			CreatedAt:   room.CreatedAt,
+			IsPrivate:   room.IsPrivate,
 		})
 		room.mu.RUnlock()
 	}

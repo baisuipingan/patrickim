@@ -57,6 +57,7 @@ function ChatApp() {
     const [nickname, setNickname] = useState(() => localStorage.getItem('nickname') || '');
     const [userNicknames, setUserNicknames] = useState({}); // id -> nickname mapping
     const [connectionStatus, setConnectionStatus] = useState({}); // id -> 'connecting' | 'connected' | 'disconnected'
+    const [isPrivate, setIsPrivate] = useState(false); // 是否创建私有房间
     const isModernAPISupported = isModernFileAPISupported();
     
     // Refs for mutable objects
@@ -87,13 +88,11 @@ function ChatApp() {
         showRoomInput,
         roomInput,
         rooms,
-        localNetworkRooms,
         myICECandidatesRef,
         setCurrentRoom,
         setShowRoomInput,
         setRoomInput,
-        fetchRooms,
-        detectLocalNetworkRooms
+        fetchRooms
     } = useRoom();
     
     // 存储 Blob URLs 用于清理
@@ -224,11 +223,17 @@ function ChatApp() {
         setShowRoomInput(false);
         localStorage.setItem('lastRoom', roomId);
         
-        // 连接到新房间
+        // 连接到新房间，传递 isPrivate 参数
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws?id=${myIdRef.current}&room=${encodeURIComponent(roomId)}`;
+        const privateParam = isPrivate ? '&private=true' : '';
+        const wsUrl = `${protocol}//${window.location.host}/ws?id=${myIdRef.current}&room=${encodeURIComponent(roomId)}${privateParam}`;
         connectWs(wsUrl);
-        log(`Joined room: ${roomId}`);
+        
+        const privateStr = isPrivate ? ' (私有)' : '';
+        log(`Joined room: ${roomId}${privateStr}`);
+        
+        // 重置私有房间选项
+        setIsPrivate(false);
     };
 
     const reconnectTimeoutRef = useRef(null);
@@ -1025,9 +1030,10 @@ function ChatApp() {
             <RoomSelector
                 roomInput={roomInput}
                 rooms={rooms}
-                localNetworkRooms={localNetworkRooms}
+                isPrivate={isPrivate}
                 onRoomInputChange={setRoomInput}
                 onJoinRoom={joinRoom}
+                onPrivateChange={setIsPrivate}
             />
         );
     }

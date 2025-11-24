@@ -1,8 +1,8 @@
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
-import { Home, Users } from 'lucide-react'
-import { cn } from '../lib/utils'
+import { Users, Lock } from 'lucide-react'
+import { Checkbox } from './ui/checkbox'
 
 /**
  * 房间选择组件
@@ -10,9 +10,10 @@ import { cn } from '../lib/utils'
 export const RoomSelector = ({
     roomInput,
     rooms,
-    localNetworkRooms,
+    isPrivate,
     onRoomInputChange,
-    onJoinRoom
+    onJoinRoom,
+    onPrivateChange
 }) => {
     return (
         <div className="flex items-center justify-center min-h-screen bg-gray-50 p-4">
@@ -27,7 +28,7 @@ export const RoomSelector = ({
                 </div>
                 
                 {/* 房间号输入框 */}
-                <div className="space-y-3 mb-6">
+                <div className="space-y-3 mb-4">
                     <Input
                         type="text" 
                         value={roomInput}
@@ -36,6 +37,22 @@ export const RoomSelector = ({
                         placeholder="输入房间号..."
                         className="h-10"
                     />
+                    
+                    {/* 私有房间选项 */}
+                    <div className="flex items-center space-x-2">
+                        <Checkbox 
+                            id="private" 
+                            checked={isPrivate}
+                            onCheckedChange={onPrivateChange}
+                        />
+                        <label
+                            htmlFor="private"
+                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer flex items-center gap-1.5"
+                        >
+                            <Lock className="w-3.5 h-3.5" />
+                            创建私有房间（仅通过房间号可见）
+                        </label>
+                    </div>
                 </div>
                 
                 {/* 加入按钮 */}
@@ -63,7 +80,6 @@ export const RoomSelector = ({
                         
                         <div className="max-h-80 overflow-y-auto space-y-2">
                             {rooms.map(room => {
-                                const isLocal = localNetworkRooms.has(room.id);
                                 return (
                                     <div 
                                         key={room.id}
@@ -71,28 +87,14 @@ export const RoomSelector = ({
                                         className="p-4 rounded-lg cursor-pointer transition-colors hover:bg-gray-50 border flex items-center justify-between"
                                     >
                                         <div className="flex items-center gap-3 flex-1 min-w-0">
-                                            <div className={cn(
-                                                "w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0",
-                                                isLocal 
-                                                    ? "bg-green-600 text-white" 
-                                                    : "bg-gray-900 text-white"
-                                            )}>
-                                                {isLocal ? (
-                                                    <Home className="w-5 h-5" />
-                                                ) : (
-                                                    <Users className="w-5 h-5" />
-                                                )}
+                                            <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-gray-900 text-white">
+                                                <Users className="w-5 h-5" />
                                             </div>
                                             <div className="flex-1 min-w-0">
                                                 <div className="flex items-center gap-2 mb-0.5">
                                                     <span className="font-semibold text-sm truncate">
                                                         {room.id}
                                                     </span>
-                                                    {isLocal && (
-                                                        <Badge variant="secondary" className="text-[10px] h-4 px-1.5">
-                                                            LAN
-                                                        </Badge>
-                                                    )}
                                                 </div>
                                                 <div className="text-[11px] text-gray-500">
                                                     {new Date(room.createdAt).toLocaleTimeString()}
