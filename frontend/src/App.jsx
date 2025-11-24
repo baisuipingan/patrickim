@@ -59,6 +59,7 @@ function ChatApp() {
     const [userNicknames, setUserNicknames] = useState({}); // id -> nickname mapping
     const [connectionStatus, setConnectionStatus] = useState({}); // id -> 'connecting' | 'connected' | 'disconnected'
     const [isPrivate, setIsPrivate] = useState(false); // 是否创建私有房间
+    const [unreadCounts, setUnreadCounts] = useState({}); // 未读消息计数 { userId: count }
     const isModernAPISupported = isModernFileAPISupported();
     
     // Refs for mutable objects
@@ -124,6 +125,28 @@ function ChatApp() {
             setTimeout(() => saveChatHistory(newHistory, currentRoom), 0);
             return newHistory;
         });
+        
+        // 更新未读消息计数
+        if (msg.from && msg.from !== 'Me' && msg.from !== myIdRef.current) {
+            // 判断消息对应的聊天窗口
+            let chatWindow = null;
+            if (msg.mode === 'private' || msg.to === myIdRef.current) {
+                // 私聊消息，对应的聊天窗口是发送者
+                chatWindow = msg.from;
+            } else if (msg.mode === 'broadcast') {
+                // 全局消息，对应的聊天窗口是 null
+                chatWindow = null;
+            }
+            
+            // 如果不是当前活跃的聊天窗口，增加未读计数
+            if (chatWindow !== activeUser) {
+                const key = chatWindow === null ? '__global__' : chatWindow;
+                setUnreadCounts(prev => ({
+                    ...prev,
+                    [key]: (prev[key] || 0) + 1
+                }));
+            }
+        }
     };
     
     // 清除当前房间的聊天历史
@@ -133,6 +156,18 @@ function ChatApp() {
             setChatHistory([]);
             log('聊天历史已清除');
         }
+    };
+    
+    // 切换聊天窗口（清零未读计数）
+    const switchToUser = (userId) => {
+        setActiveUser(userId);
+        // 清零该聊天窗口的未读计数
+        const key = userId === null ? '__global__' : userId;
+        setUnreadCounts(prev => {
+            const newCounts = { ...prev };
+            delete newCounts[key];
+            return newCounts;
+        });
     };
     
     // getDisplayName 在下面定义（需要访问 nickname 状态）
@@ -248,6 +283,9 @@ function ChatApp() {
         if (history.length > 0) {
             log(`Loaded ${history.length} messages from history`);
         }
+        
+        // 清空未读计数（切换房间时）
+        setUnreadCounts({});
         
         setOnlineUsers(new Set([myIdRef.current]));
         setCurrentRoom(roomId);
@@ -388,7 +426,7 @@ function ChatApp() {
                 });
                 // 如果正在与该用户私聊，切回全局聊天
                 if (activeUser === from) {
-                    setActiveUser(null);
+                    switchToUser(null);
                     log(`User ${from} left. Switched to Global Chat.`);
                 }
                 break;
@@ -1099,13 +1137,15 @@ function ChatApp() {
                         <div 
                             key="global-chat" 
                             className={cn(
-                                "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors cursor-pointer",
+                                "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                 activeUser === null 
                                     ? "bg-gray-900 text-white" 
-                                    : "hover:bg-gray-100 text-gray-900"
+                                    : unreadCounts['__global__'] > 0
+                                        ? "hover:bg-gray-100 text-gray-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                        : "hover:bg-gray-100 text-gray-900"
                             )}
                             onClick={() => {
-                                setActiveUser(null);
+                                switchToUser(null);
                                 setIsSidebarOpen(false);
                             }}
                         >
@@ -1128,6 +1168,11 @@ function ChatApp() {
                                     Everyone
                                 </span>
                             </div>
+                            {unreadCounts['__global__'] > 0 && (
+                                <div className="flex-shrink-0 bg-green-500 text-white text-xs font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center">
+                                    {unreadCounts['__global__']}
+                                </div>
+                            )}
                         </div>
                         
                         {/* Individual Users */}
@@ -1144,17 +1189,21 @@ function ChatApp() {
                             };
                             const currentStatus = statusConfig[status];
                             
+                            const unreadCount = unreadCounts[user] || 0;
+                            
                             return (
                                 <div 
                                     key={user} 
                                     className={cn(
-                                        "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors cursor-pointer",
+                                        "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                         activeUser === user 
                                             ? "bg-gray-900 text-white" 
-                                            : "hover:bg-gray-100 text-gray-900"
+                                            : unreadCount > 0
+                                                ? "hover:bg-gray-100 text-gray-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                                : "hover:bg-gray-100 text-gray-900"
                                     )}
                                     onClick={() => {
-                                        setActiveUser(user);
+                                        switchToUser(user);
                                         setIsSidebarOpen(false);
                                     }}
                                 >
@@ -1188,6 +1237,11 @@ function ChatApp() {
                                             {currentStatus.text}
                                         </span>
                                     </div>
+                                    {unreadCount > 0 && (
+                                        <div className="flex-shrink-0 bg-green-500 text-white text-xs font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center">
+                                            {unreadCount}
+                                        </div>
+                                    )}
                                 </div>
                             );
                         })}
