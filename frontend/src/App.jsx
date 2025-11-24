@@ -117,6 +117,7 @@ function ChatApp() {
     
     const chatBoxRef = useRef(null);
     const firstUnreadRef = useRef(null); // 第一条未读消息的 ref
+    const scrollTimeoutRef = useRef(null); // 滚动防抖定时器
     
     // 保存 lastReadTime 到 localStorage
     useEffect(() => {
@@ -124,6 +125,60 @@ function ChatApp() {
             localStorage.setItem(`lastReadTime_${myIdRef.current}`, JSON.stringify(lastReadTime));
         }
     }, [lastReadTime]);
+    
+    // 滚动监听：滚动到底部时标记为已读
+    useEffect(() => {
+        const chatBox = chatBoxRef.current;
+        if (!chatBox) return;
+        
+        const handleScroll = () => {
+            // 清除之前的定时器
+            if (scrollTimeoutRef.current) {
+                clearTimeout(scrollTimeoutRef.current);
+            }
+            
+            // 防抖：滚动停止 300ms 后才处理
+            scrollTimeoutRef.current = setTimeout(() => {
+                const isAtBottom = chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 50;
+                
+                if (isAtBottom) {
+                    // 滚动到底部，标记为已读
+                    const chatKey = activeUser === null ? '__global__' : activeUser;
+                    setLastReadTime(prev => ({
+                        ...prev,
+                        [chatKey]: Date.now()
+                    }));
+                    console.log('📜 滚动到底部，标记为已读');
+                }
+            }, 300);
+        };
+        
+        chatBox.addEventListener('scroll', handleScroll);
+        return () => {
+            chatBox.removeEventListener('scroll', handleScroll);
+            if (scrollTimeoutRef.current) {
+                clearTimeout(scrollTimeoutRef.current);
+            }
+        };
+    }, [activeUser]);
+    
+    // 页面卸载时保存当前已读时间
+    useEffect(() => {
+        const handleBeforeUnload = () => {
+            if (activeUser !== undefined) {
+                const chatKey = activeUser === null ? '__global__' : activeUser;
+                const updatedTime = {
+                    ...lastReadTime,
+                    [chatKey]: Date.now()
+                };
+                localStorage.setItem(`lastReadTime_${myIdRef.current}`, JSON.stringify(updatedTime));
+                console.log('💾 页面卸载，保存已读时间');
+            }
+        };
+        
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [activeUser, lastReadTime]);
     
     const log = (msg) => setLogs(prev => [...prev, msg]);
     
@@ -217,13 +272,7 @@ function ChatApp() {
         // 如果有第一条未读消息的 ref，滚动到那里
         if (firstUnreadRef.current) {
             console.log('👉 有未读消息，滚动到第一条');
-            firstUnreadRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            // 稍微向上偏移一点，让“未读消息”标签更明显
-            setTimeout(() => {
-                if (chatBoxRef.current) {
-                    chatBoxRef.current.scrollTop -= 20;
-                }
-            }, 300);
+            firstUnreadRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else {
             console.log('👉 没有未读消息，滚动到底部');
             // 否则滚动到底部
