@@ -54,6 +54,7 @@ function ChatApp() {
     const [previewImage, setPreviewImage] = useState(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [activeUser, setActiveUser] = useState(null); // null = Global Chat, string = Private Chat User ID
+    const activeUserRef = useRef(null); // Ref version of activeUser for callbacks
     const [isEditingNickname, setIsEditingNickname] = useState(false);
     const [nickname, setNickname] = useState(() => localStorage.getItem('nickname') || '');
     const [userNicknames, setUserNicknames] = useState({}); // id -> nickname mapping
@@ -118,6 +119,11 @@ function ChatApp() {
     const chatBoxRef = useRef(null);
     const firstUnreadRef = useRef(null); // 第一条未读消息的 ref
     const scrollTimeoutRef = useRef(null); // 滚动防抖定时器
+    
+    // 同步 activeUser 到 ref
+    useEffect(() => {
+        activeUserRef.current = activeUser;
+    }, [activeUser]);
     
     // 保存 lastReadTime 到 localStorage
     useEffect(() => {
@@ -218,11 +224,18 @@ function ChatApp() {
             }
             
             // 如果不是当前活跃的聊天窗口，增加未读计数
-            if (chatWindow !== activeUser) {
+            if (chatWindow !== activeUserRef.current) {
                 const key = chatWindow === null ? '__global__' : chatWindow;
                 setUnreadCounts(prev => ({
                     ...prev,
                     [key]: (prev[key] || 0) + 1
+                }));
+            } else {
+                // 如果是当前活跃窗口，直接更新已读时间，防止刷新后显示未读
+                const key = chatWindow === null ? '__global__' : chatWindow;
+                setLastReadTime(prev => ({
+                    ...prev,
+                    [key]: Date.now()
                 }));
             }
         }
