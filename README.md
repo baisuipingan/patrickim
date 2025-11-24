@@ -43,11 +43,6 @@ docker build -t patrick-im .
 docker run -d -p 3456:3456 patrick-im
 ```
 
-### 远程部署
-
-```bash
-./deploy-remote.sh
-```
 
 ## 📝 License
 
