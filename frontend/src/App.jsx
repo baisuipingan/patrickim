@@ -5,6 +5,7 @@ import { isModernFileAPISupported } from './utils/fileUtils';
 import { ICE_SERVERS } from './constants/config';
 import { useRoom } from './hooks/useRoom';
 import { useFileTransfer } from './hooks/useFileTransfer';
+import { useChatHistory } from './hooks/useChatHistory';
 import { RoomSelector } from './components/RoomSelector';
 import FileProgress from './components/FileProgress';
 import MessageInput from './components/MessageInput';
@@ -13,7 +14,7 @@ import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Badge } from './components/ui/badge';
 import { Avatar, AvatarFallback } from './components/ui/avatar';
-import { Menu, Globe, Edit2, X } from 'lucide-react';
+import { Menu, Globe, Edit2, X, Trash2 } from 'lucide-react';
 import { cn } from './lib/utils';
 
 class ErrorBoundary extends Component {
@@ -95,6 +96,12 @@ function ChatApp() {
         fetchRooms
     } = useRoom();
     
+    // 聊天历史管理 Hook
+    const { loadChatHistory, saveChatHistory, clearChatHistory } = useChatHistory(
+        myIdRef.current,
+        currentRoom
+    );
+    
     // 存储 Blob URLs 用于清理
     const blobUrlsRef = useRef(new Set());
     
@@ -108,7 +115,25 @@ function ChatApp() {
     }, [chatHistory]);
     
     const log = (msg) => setLogs(prev => [...prev, msg]);
-    const addChat = (msg) => setChatHistory(prev => [...prev, msg]);
+    
+    // 添加聊天消息并自动保存到 localStorage
+    const addChat = (msg) => {
+        setChatHistory(prev => {
+            const newHistory = [...prev, msg];
+            // 异步保存，不阻塞UI
+            setTimeout(() => saveChatHistory(newHistory, currentRoom), 0);
+            return newHistory;
+        });
+    };
+    
+    // 清除当前房间的聊天历史
+    const handleClearHistory = () => {
+        if (window.confirm('确定要清除当前房间的聊天历史吗？此操作不可恢复。')) {
+            clearChatHistory(currentRoom);
+            setChatHistory([]);
+            log('聊天历史已清除');
+        }
+    };
     
     // getDisplayName 在下面定义（需要访问 nickname 状态）
     const getDisplayName = (userId) => {
@@ -216,8 +241,14 @@ function ChatApp() {
         
         cleanupConnections();
         
-        // 重置状态
-        setChatHistory([]);
+        // 加载该房间的聊天历史
+        const history = loadChatHistory(roomId);
+        setChatHistory(history);
+        
+        if (history.length > 0) {
+            log(`Loaded ${history.length} messages from history`);
+        }
+        
         setOnlineUsers(new Set([myIdRef.current]));
         setCurrentRoom(roomId);
         setShowRoomInput(false);
@@ -1218,6 +1249,15 @@ function ChatApp() {
                                 )}
                             </div>
                         </div>
+                        <Button 
+                            onClick={handleClearHistory}
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 p-0 shrink-0"
+                            title="清除聊天历史"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                        </Button>
                         <Button 
                             onClick={() => {
                                 setShowRoomInput(true);

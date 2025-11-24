@@ -68,11 +68,18 @@ export default function ChatMessage({ message, displayName, isMine, onImageClick
             );
         }
         
-        // 仅显示文件名（无数据）
+        // 仅显示文件名（无数据或已过期）
         return (
-            <div className="flex items-center gap-2 p-3 bg-white/10 rounded-lg">
-                <FileText className="w-5 h-5" />
-                <span className="font-medium">{c.name}</span>
+            <div className="flex items-start gap-2 p-3 bg-white/10 rounded-lg">
+                <FileText className="w-5 h-5 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{c.name}</div>
+                    {c.expired && (
+                        <div className="text-xs opacity-60 mt-1">
+                            文件已过期（历史记录）
+                        </div>
+                    )}
+                </div>
             </div>
         );
     };
