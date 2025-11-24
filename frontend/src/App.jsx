@@ -45,6 +45,18 @@ class ErrorBoundary extends Component {
 }
 
 function ChatApp() {
+    // Refs for mutable objects
+    const getStoredId = () => {
+        let id = sessionStorage.getItem("userId");
+        if (!id) {
+            id = Math.random().toString(36).substr(2, 9);
+            sessionStorage.setItem("userId", id);
+        }
+        return id;
+    };
+    const myIdRef = useRef(getStoredId());
+    const wsRef = useRef(null);
+
     const [logs, setLogs] = useState([]);
     const [message, setMessage] = useState("");
     const [isComposing, setIsComposing] = useState(false); // 输入法输入状态
@@ -72,17 +84,6 @@ function ChatApp() {
     }); // 记录每个聊天窗口的最后已读时间 { chatKey: timestamp }
     const isModernAPISupported = isModernFileAPISupported();
     
-    // Refs for mutable objects
-    const wsRef = useRef(null);
-    const getStoredId = () => {
-        let id = sessionStorage.getItem("userId");
-        if (!id) {
-            id = Math.random().toString(36).substr(2, 9);
-            sessionStorage.setItem("userId", id);
-        }
-        return id;
-    };
-    const myIdRef = useRef(getStoredId());
     const peersRef = useRef({}); // id -> {pc, dc}
     const eventQueueRef = useRef({}); // remoteId -> EventQueue
     const connectionTimeoutRef = useRef({}); // remoteId -> timeout handle
