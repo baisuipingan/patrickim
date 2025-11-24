@@ -184,12 +184,14 @@ function ChatApp() {
     
     // 切换聊天窗口（清零未读计数并记录已读时间）
     const switchToUser = (userId) => {
-        // 记录当前窗口的已读时间
-        const currentKey = activeUser === null ? '__global__' : activeUser;
-        setLastReadTime(prev => ({
-            ...prev,
-            [currentKey]: Date.now()
-        }));
+        // 记录当前（旧）窗口的已读时间
+        if (activeUser !== undefined) {
+            const currentKey = activeUser === null ? '__global__' : activeUser;
+            setLastReadTime(prev => ({
+                ...prev,
+                [currentKey]: Date.now()
+            }));
+        }
         
         // 重置第一条未读消息的 ref
         firstUnreadRef.current = null;
@@ -204,14 +206,8 @@ function ChatApp() {
             return newCounts;
         });
         
-        // 更新该窗口的已读时间
-        setLastReadTime(prev => ({
-            ...prev,
-            [key]: Date.now()
-        }));
-        
-        // 滚动到未读消息或底部（延迟以等待DOM更新）
-        setTimeout(() => scrollToUnreadOrBottom(key), 150);
+        // 延迟滚动，等待DOM更新和ref绑定
+        setTimeout(() => scrollToUnreadOrBottom(key), 200);
     };
     
     // 智能滚动：滚动到第一条未读消息或底部
@@ -220,16 +216,23 @@ function ChatApp() {
         
         // 如果有第一条未读消息的 ref，滚动到那里
         if (firstUnreadRef.current) {
+            console.log('👉 有未读消息，滚动到第一条');
             firstUnreadRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            // 稍微向上偏移一点，让"未读消息"标签更明显
+            // 稍微向上偏移一点，让“未读消息”标签更明显
             setTimeout(() => {
                 if (chatBoxRef.current) {
                     chatBoxRef.current.scrollTop -= 20;
                 }
-            }, 200);
+            }, 300);
         } else {
+            console.log('👉 没有未读消息，滚动到底部');
             // 否则滚动到底部
             chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
+            // 滚动到底部后标记为已读
+            setLastReadTime(prev => ({
+                ...prev,
+                [chatKey]: Date.now()
+            }));
         }
     };
     
@@ -336,6 +339,15 @@ function ChatApp() {
     
     const joinRoom = (roomId) => {
         if (!roomId.trim()) return;
+        
+        // 记录当前房间当前窗口的已读时间
+        if (currentRoom && activeUser !== undefined) {
+            const key = activeUser === null ? '__global__' : activeUser;
+            setLastReadTime(prev => ({
+                ...prev,
+                [key]: Date.now()
+            }));
+        }
         
         cleanupConnections();
         
@@ -1396,6 +1408,15 @@ function ChatApp() {
                             const lastRead = lastReadTime[chatKey] || 0;
                             const isUnread = c.timestamp && c.timestamp > lastRead && c.from !== 'Me' && c.from !== myIdRef.current;
                             
+                            // 调试日志
+                            if (i === 0) {
+                                console.log(`📱 渲染消息 - chatKey: ${chatKey}, lastRead: ${new Date(lastRead).toLocaleString()}, 消息总数: ${filteredChatHistory.length}`);
+                            }
+                            
+                            if (isUnread) {
+                                console.log(`✉️ 未读消息 #${i}: from=${c.from}, timestamp=${new Date(c.timestamp).toLocaleString()}`);
+                            }
+                            
                             // 检查这是否是第一条未读消息（往前找第一个非自己发送的消息）
                             let isFirstUnread = false;
                             if (isUnread) {
@@ -1412,6 +1433,10 @@ function ChatApp() {
                                     break;
                                 }
                                 isFirstUnread = !hasUnreadBefore;
+                                
+                                if (isFirstUnread) {
+                                    console.log(`🔴 第一条未读消息在索引 #${i}`);
+                                }
                             }
                             
                             return (
