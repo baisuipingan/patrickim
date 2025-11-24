@@ -474,6 +474,52 @@ function ChatApp() {
         }
 
         peersRef.current[remoteId] = { pc, dc: initiator ? dc : null };
+        
+        // 检测网络连接类型的辅助函数
+        const detectNetworkType = () => {
+            pc.getStats().then(stats => {
+                stats.forEach(report => {
+                    if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                        // 获取本地和远程候选者信息
+                        stats.forEach(candidate => {
+                            if (candidate.id === report.localCandidateId) {
+                                const localType = candidate.candidateType;
+                                const localAddress = candidate.address || candidate.ip;
+                                
+                                stats.forEach(remote => {
+                                    if (remote.id === report.remoteCandidateId) {
+                                        const remoteType = remote.candidateType;
+                                        const remoteAddress = remote.address || remote.ip;
+                                        
+                                        // 判断是否为局域网连接
+                                        // host类型表示直连（局域网），srflx表示STUN穿透（公网），relay表示TURN中继
+                                        const isLAN = localType === 'host' && remoteType === 'host';
+                                        const networkType = isLAN ? 'lan' : 'wan';
+                                        
+                                        log(`${remoteId} 连接类型: ${networkType.toUpperCase()} (${localType} -> ${remoteType})`);
+                                        
+                                        // 更新连接状态，包含网络类型信息
+                                        setConnectionStatus(prev => ({
+                                            ...prev,
+                                            [remoteId]: {
+                                                status: 'connected',
+                                                networkType,
+                                                localAddress,
+                                                remoteAddress,
+                                                localType,
+                                                remoteType
+                                            }
+                                        }));
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }).catch(err => {
+                console.error('Failed to get connection stats:', err);
+            });
+        };
 
         pc.onicecandidate = (e) => {
             if (e.candidate) {
@@ -526,6 +572,12 @@ function ChatApp() {
                 }, 2000); // 等待2秒，看连接是否能自动恢复
             } else if (state === 'connected' || state === 'completed') {
                 log(`ICE connection established with ${remoteId}`);
+                // ICE连接稳定后，延迟500ms检测网络类型（等待候选者对最终确定）
+                setTimeout(() => {
+                    if (peersRef.current[remoteId]) {
+                        detectNetworkType();
+                    }
+                }, 500);
             }
         };
         
@@ -565,53 +617,7 @@ function ChatApp() {
             }
             // 更新连接状态为已连接（先设置基本状态）
             setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'connected' } }));
-            
-            // 检测网络连接类型（LAN还是WAN）
-            const pc = peersRef.current[remoteId]?.pc;
-            if (pc) {
-                pc.getStats().then(stats => {
-                    stats.forEach(report => {
-                        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                            // 获取本地和远程候选者信息
-                            stats.forEach(candidate => {
-                                if (candidate.id === report.localCandidateId) {
-                                    const localType = candidate.candidateType;
-                                    const localAddress = candidate.address || candidate.ip;
-                                    
-                                    stats.forEach(remote => {
-                                        if (remote.id === report.remoteCandidateId) {
-                                            const remoteType = remote.candidateType;
-                                            const remoteAddress = remote.address || remote.ip;
-                                            
-                                            // 判断是否为局域网连接
-                                            // host类型表示直连（局域网），srflx表示STUN穿透（公网），relay表示TURN中继
-                                            const isLAN = localType === 'host' && remoteType === 'host';
-                                            const networkType = isLAN ? 'lan' : 'wan';
-                                            
-                                            log(`${remoteId} 连接类型: ${networkType.toUpperCase()} (${localType} -> ${remoteType})`);
-                                            
-                                            // 更新连接状态，包含网络类型信息
-                                            setConnectionStatus(prev => ({
-                                                ...prev,
-                                                [remoteId]: {
-                                                    status: 'connected',
-                                                    networkType,
-                                                    localAddress,
-                                                    remoteAddress,
-                                                    localType,
-                                                    remoteType
-                                                }
-                                            }));
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
-                }).catch(err => {
-                    console.error('Failed to get connection stats:', err);
-                });
-            }
+            // 注意：网络类型检测移到 ICE 状态变化监听中，等待连接稳定后再检测
         };
         
         dc.onclose = () => {
