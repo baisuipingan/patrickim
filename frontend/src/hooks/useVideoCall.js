@@ -67,23 +67,28 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
     const ringtoneRef = useRef(null);
     
     /**
-     * 获取本地媒体流
+     * 获取本地媒体流（允许无设备时返回 null）
      */
-    const getLocalStream = useCallback(async (video = true, audio = true) => {
+    const getLocalStream = useCallback(async (video = true, audio = true, required = false) => {
         // 检查是否在安全上下文中
         if (!window.isSecureContext) {
-            const msg = '⚠️ 摄像头/麦克风需要安全连接。请使用 localhost 或 HTTPS 访问，或在 Chrome 设置中添加例外：chrome://flags/#unsafely-treat-insecure-origin-as-secure';
+            const msg = '⚠️ 摄像头/麦克风需要安全连接。请使用 localhost 或 HTTPS 访问';
             log(msg);
-            alert(msg);
-            throw new Error('不安全的上下文');
+            if (required) {
+                alert(msg);
+                throw new Error('不安全的上下文');
+            }
+            return null;
         }
         
         // 检查是否支持 mediaDevices API
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            const msg = '❌ 浏览器不支持摄像头/麦克风访问';
-            log(msg);
-            alert(msg);
-            throw new Error('不支持 getUserMedia');
+            log('⚠️ 浏览器不支持摄像头/麦克风访问');
+            if (required) {
+                alert('❌ 浏览器不支持摄像头/麦克风访问');
+                throw new Error('不支持 getUserMedia');
+            }
+            return null;
         }
         
         try {
@@ -100,18 +105,24 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 } : false
             });
             localStreamRef.current = stream;
-            setLocalStream(stream); // 触发重新渲染
+            setLocalStream(stream);
             return stream;
         } catch (error) {
-            let msg = `❌ 获取媒体设备失败: ${error.message}`;
+            let msg = `⚠️ 获取媒体设备失败: ${error.message}`;
             if (error.name === 'NotAllowedError') {
-                msg = '❌ 摄像头/麦克风权限被拒绝，请在浏览器设置中允许';
+                msg = '⚠️ 摄像头/麦克风权限被拒绝';
             } else if (error.name === 'NotFoundError') {
-                msg = '❌ 未检测到摄像头或麦克风设备';
+                msg = '⚠️ 未检测到摄像头或麦克风设备，将以仅接收模式通话';
             }
             log(msg);
-            alert(msg);
-            throw error;
+            
+            if (required) {
+                alert(msg);
+                throw error;
+            }
+            
+            // 非必须时，无设备也返回 null 继续通话
+            return null;
         }
     }, [log]);
     
@@ -180,17 +191,25 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         try {
             setCallStatus(CALL_STATUS.CALLING);
             setRemoteUser(targetUserId);
-            setIsVideoEnabled(videoEnabled);
             
-            // 获取本地媒体流
-            const stream = await getLocalStream(videoEnabled, true);
+            // 尝试获取本地媒体流（允许无设备）
+            const stream = await getLocalStream(videoEnabled, true, false);
+            
+            // 根据实际获取的流更新状态
+            if (stream) {
+                setIsVideoEnabled(videoEnabled);
+            } else {
+                log('📺 以仅接收模式发起通话（无本地摄像头/麦克风）');
+                setIsVideoEnabled(false);
+                setIsAudioEnabled(false);
+            }
             
             // 设置远端轨道监听
             setupRemoteTrackListener(targetUserId);
             
             // 发送通话请求信令
             sendSignal(CALL_MESSAGE_TYPES.CALL_REQUEST, targetUserId, {
-                video: videoEnabled,
+                video: stream ? videoEnabled : false,
                 callerId: myId,
                 callerName: getDisplayName(myId)
             });
@@ -287,18 +306,24 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         }
         
         try {
-            // 获取本地媒体流
-            const stream = await getLocalStream(isVideoEnabled, true);
+            // 尝试获取本地媒体流（允许无设备）
+            const stream = await getLocalStream(isVideoEnabled, true, false);
             
-            // 设置远端轨道监听
+            // 设置远端轨道监听（即使没有本地流也要监听远端）
             setupRemoteTrackListener(currentRemoteUser);
             
-            // 添加轨道到连接
-            addTracksToConnection(stream, currentRemoteUser);
+            // 如果有本地流，添加轨道到连接
+            if (stream) {
+                addTracksToConnection(stream, currentRemoteUser);
+            } else {
+                log('📺 以仅接收模式接听（无本地摄像头/麦克风）');
+                setIsVideoEnabled(false);
+                setIsAudioEnabled(false);
+            }
             
             // 发送接听信令
             sendSignal(CALL_MESSAGE_TYPES.CALL_ACCEPT, currentRemoteUser, {
-                video: isVideoEnabled
+                video: stream ? isVideoEnabled : false
             });
             
             setCallStatus(CALL_STATUS.CONNECTED);
