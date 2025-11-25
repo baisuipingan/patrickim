@@ -280,12 +280,32 @@ function ChatApp() {
         }
     };
     
-    // 清除当前房间的聊天历史
+    // 清除当前聊天窗口的历史记录
     const handleClearHistory = () => {
-        if (window.confirm('确定要清除当前房间的聊天历史吗？此操作不可恢复。')) {
-            clearChatHistory(currentRoom);
-            setChatHistory([]);
-            log('聊天历史已清除');
+        const chatName = activeUser === null ? '全局聊天' : `与 ${getDisplayName(activeUser)} 的聊天`;
+        if (window.confirm(`确定要清除 ${chatName} 记录吗？此操作不可恢复。`)) {
+            setChatHistory(prev => {
+                // 过滤掉当前窗口的消息，保留其他窗口的消息
+                const newHistory = prev.filter(msg => {
+                    if (activeUser === null) {
+                        // 如果是清除全局聊天，保留私聊消息
+                        return msg.mode === 'private';
+                    } else {
+                        // 如果是清除私聊，保留全局消息和其他人的私聊
+                        // 删除条件：mode是private 且 (与activeUser有关)
+                        const isTargetMessage = msg.mode === 'private' && (
+                            (msg.from === 'Me' && msg.to === activeUser) || 
+                            (msg.from === activeUser)
+                        );
+                        return !isTargetMessage;
+                    }
+                });
+                
+                // 保存新的历史记录
+                saveChatHistory(newHistory, currentRoom);
+                return newHistory;
+            });
+            log(`${chatName} 记录已清除`);
         }
     };
     
@@ -1285,7 +1305,7 @@ function ChatApp() {
 
     return (
         <div 
-            className="w-full h-screen bg-slate-50 relative"
+            className="w-full h-screen bg-blue-50 relative"
             onDragEnter={handleDragEnter}
             onDragLeave={handleDragLeave}
             onDragOver={handleDragOver}
@@ -1293,7 +1313,7 @@ function ChatApp() {
         >
             {/* Drag & Drop Overlay */}
             {isDragging && (
-                <div className="absolute inset-0 z-50 bg-slate-900/50 flex items-center justify-center backdrop-blur-sm border-4 border-dashed border-blue-500 m-4 rounded-xl pointer-events-none">
+                <div className="absolute inset-0 z-50 bg-blue-900/50 flex items-center justify-center backdrop-blur-sm border-4 border-dashed border-blue-500 m-4 rounded-xl pointer-events-none">
                     <div className="text-white text-xl font-medium flex flex-col items-center gap-4">
                         <div className="p-4 bg-blue-500/20 rounded-full">
                             <Upload className="w-16 h-16 text-blue-400" />
@@ -1333,10 +1353,10 @@ function ChatApp() {
                             className={cn(
                                 "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                 activeUser === null 
-                                    ? "bg-[#0f172a] text-white" 
+                                    ? "bg-[#1e3a8a] text-white" 
                                     : unreadCounts['__global__'] > 0
-                                        ? "hover:bg-slate-100 text-slate-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
-                                        : "hover:bg-slate-100 text-slate-900"
+                                        ? "hover:bg-blue-100 text-blue-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                        : "hover:bg-blue-100 text-blue-900"
                             )}
                             onClick={() => {
                                 switchToUser(null);
@@ -1347,9 +1367,9 @@ function ChatApp() {
                                 "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
                                 activeUser === null 
                                     ? "bg-white/10" 
-                                    : "bg-slate-100"
+                                    : "bg-blue-100"
                             )}>
-                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white" : "text-slate-600")} />
+                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white" : "text-blue-600")} />
                             </div>
                             <div className="flex flex-col flex-1 min-w-0">
                                 <span className="text-sm font-medium truncate">
@@ -1357,7 +1377,7 @@ function ChatApp() {
                                 </span>
                                 <span className={cn(
                                     "text-xs",
-                                    activeUser === null ? "text-white/70" : "text-slate-500"
+                                    activeUser === null ? "text-white/70" : "text-blue-500"
                                 )}>
                                     Everyone
                                 </span>
@@ -1391,10 +1411,10 @@ function ChatApp() {
                                     className={cn(
                                         "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                         activeUser === user 
-                                            ? "bg-[#0f172a] text-white" 
+                                            ? "bg-[#1e3a8a] text-white" 
                                             : unreadCount > 0
-                                                ? "hover:bg-slate-100 text-slate-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
-                                                : "hover:bg-slate-100 text-slate-900"
+                                                ? "hover:bg-blue-100 text-blue-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                                : "hover:bg-blue-100 text-blue-900"
                                     )}
                                     onClick={() => {
                                         switchToUser(user);
@@ -1406,17 +1426,17 @@ function ChatApp() {
                                             "w-9 h-9 rounded-lg flex items-center justify-center font-semibold text-xs",
                                             activeUser === user 
                                                 ? "bg-white/10 text-white" 
-                                                : "bg-[#0f172a] text-white"
+                                                : "bg-[#1e3a8a] text-white"
                                         )}>
                                             {getInitials(displayName)}
                                         </div>
                                         <div 
                                             className={cn(
                                                 "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2",
-                                                activeUser === user ? "border-[#0f172a]" : "border-white",
+                                                activeUser === user ? "border-[#1e3a8a]" : "border-white",
                                                 status === 'connected' && "bg-green-500",
                                                 status === 'connecting' && "bg-amber-500",
-                                                status === 'disconnected' && "bg-slate-400"
+                                                status === 'disconnected' && "bg-blue-400"
                                             )}
                                         />
                                     </div>
@@ -1426,7 +1446,7 @@ function ChatApp() {
                                         </span>
                                         <span className={cn(
                                             "text-xs",
-                                            activeUser === user ? "text-white/70" : "text-slate-500"
+                                            activeUser === user ? "text-white/70" : "text-blue-500"
                                         )}>
                                             {currentStatus.text}
                                         </span>
@@ -1478,7 +1498,7 @@ function ChatApp() {
                                         <Button 
                                             variant="ghost" 
                                             size="icon" 
-                                            className="h-5 w-5 p-0 hover:bg-slate-100"
+                                            className="h-5 w-5 p-0 hover:bg-blue-100"
                                             onClick={() => setIsEditingNickname(true)}
                                         >
                                             <Edit2 className="w-3 h-3" />
@@ -1489,7 +1509,7 @@ function ChatApp() {
                                         onClick={() => setIsEditingNickname(true)} 
                                         size="icon"
                                         variant="ghost"
-                                        className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground hover:bg-slate-100"
+                                        className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground hover:bg-blue-100"
                                         title="设置昵称"
                                     >
                                         <Edit2 className="w-3 h-3" />
@@ -1520,7 +1540,7 @@ function ChatApp() {
                     </div>
 
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-slate-50" ref={chatBoxRef}>
+                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-blue-50" ref={chatBoxRef}>
                         {filteredChatHistory.map((c, i) => {
                             // 计算是否是第一条未读消息
                             const chatKey = activeUser === null ? '__global__' : activeUser;

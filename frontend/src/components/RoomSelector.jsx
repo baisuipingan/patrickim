@@ -16,7 +16,7 @@ export const RoomSelector = ({
     onPrivateChange
 }) => {
     return (
-        <div className="flex items-center justify-center min-h-screen bg-gray-50 p-4">
+        <div className="flex items-center justify-center min-h-screen bg-blue-50 p-4">
             <div className="bg-white rounded-lg p-8 max-w-md w-full shadow-lg border">
                 <div className="mb-6">
                     <h1 className="text-2xl font-bold mb-2">
@@ -58,7 +58,7 @@ export const RoomSelector = ({
                 {/* 加入按钮 */}
                 <Button 
                     onClick={() => onJoinRoom(roomInput)}
-                    className="w-full mb-6 h-10"
+                    className="w-full mb-6 h-10 bg-[#1e3a8a] hover:bg-[#1e3a8a]/90"
                     size="default"
                 >
                     加入房间
@@ -84,10 +84,10 @@ export const RoomSelector = ({
                                     <div 
                                         key={room.id}
                                         onClick={() => onJoinRoom(room.id)}
-                                        className="p-4 rounded-lg cursor-pointer transition-colors hover:bg-gray-50 border flex items-center justify-between"
+                                        className="p-4 rounded-lg cursor-pointer transition-colors hover:bg-blue-50 border flex items-center justify-between"
                                     >
                                         <div className="flex items-center gap-3 flex-1 min-w-0">
-                                            <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-gray-900 text-white">
+                                            <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-[#1e3a8a] text-white">
                                                 <Users className="w-5 h-5" />
                                             </div>
                                             <div className="flex-1 min-w-0">

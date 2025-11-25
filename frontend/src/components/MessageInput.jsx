@@ -142,7 +142,7 @@ export default function MessageInput({
                 <Button 
                     onClick={onSendMessage} 
                     size="icon"
-                    className="shrink-0 h-9 w-9"
+                    className="shrink-0 h-9 w-9 bg-[#1e3a8a] hover:bg-[#1e3a8a]/90 text-white"
                 >
                     <Send className="w-4 h-4" />
                 </Button>
