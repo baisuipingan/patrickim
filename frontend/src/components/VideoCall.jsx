@@ -13,7 +13,9 @@ import {
     MonitorOff,
     Minimize2,
     Maximize2,
-    X
+    X,
+    Expand,
+    Shrink
 } from 'lucide-react';
 
 /**
@@ -139,18 +141,40 @@ export function VideoCallWindow({
     const containerRef = useRef(null);
     
     const [isMinimized, setIsMinimized] = useState(false);
+    const [isFullscreen, setIsFullscreen] = useState(false);
     const [position, setPosition] = useState({ x: 20, y: 20 });
     const [isDragging, setIsDragging] = useState(false);
     const dragStartRef = useRef({ x: 0, y: 0 });
     
-    // 设置本地视频流
+    // 切换全屏
+    const toggleFullscreen = () => {
+        setIsFullscreen(!isFullscreen);
+        setIsMinimized(false);
+    };
+    
+    // 设置本地视频流 - 使用 ref callback 确保立即设置
+    const setLocalVideoRef = (element) => {
+        localVideoRef.current = element;
+        if (element && localStream) {
+            element.srcObject = localStream;
+        }
+    };
+    
+    // 设置远端视频流 - 使用 ref callback 确保立即设置
+    const setRemoteVideoRef = (element) => {
+        remoteVideoRef.current = element;
+        if (element && remoteStream) {
+            element.srcObject = remoteStream;
+        }
+    };
+    
+    // 当流变化时也更新
     useEffect(() => {
         if (localVideoRef.current && localStream) {
             localVideoRef.current.srcObject = localStream;
         }
     }, [localStream]);
     
-    // 设置远端视频流
     useEffect(() => {
         if (remoteVideoRef.current && remoteStream) {
             remoteVideoRef.current.srcObject = remoteStream;
@@ -205,7 +229,7 @@ export function VideoCallWindow({
                 <div className="relative">
                     {/* 远端视频缩略图 */}
                     <video
-                        ref={remoteVideoRef}
+                        ref={setRemoteVideoRef}
                         autoPlay
                         playsInline
                         className="w-full h-28 object-cover bg-black"
@@ -245,34 +269,48 @@ export function VideoCallWindow({
         );
     }
     
-    // 完整模式
+    // 完整模式（支持全屏）
     return (
         <div
             ref={containerRef}
             className={cn(
-                "fixed z-50 bg-card border border-border rounded-2xl shadow-2xl overflow-hidden",
-                isDragging ? "cursor-grabbing" : "cursor-grab"
+                "fixed z-50 bg-card overflow-hidden flex flex-col",
+                isFullscreen 
+                    ? "inset-0 rounded-none" 
+                    : "border border-border rounded-2xl shadow-2xl",
+                !isFullscreen && (isDragging ? "cursor-grabbing" : "cursor-grab")
             )}
-            style={{
+            style={isFullscreen ? {} : {
                 left: position.x,
                 top: position.y,
                 width: 480,
                 maxWidth: 'calc(100vw - 40px)'
             }}
-            onMouseDown={handleMouseDown}
+            onMouseDown={isFullscreen ? undefined : handleMouseDown}
         >
             {/* 标题栏 */}
-            <div className="bg-muted/50 px-4 py-2 flex items-center justify-between border-b">
+            <div className="bg-muted/50 px-4 py-2 flex items-center justify-between border-b shrink-0">
                 <span className="font-medium text-sm">与 {remoteName} 通话中</span>
                 <div className="flex gap-1">
                     <Button
-                        onClick={() => setIsMinimized(true)}
+                        onClick={toggleFullscreen}
                         variant="ghost"
                         size="icon"
                         className="w-7 h-7"
+                        title={isFullscreen ? "退出全屏" : "全屏"}
                     >
-                        <Minimize2 className="w-4 h-4" />
+                        {isFullscreen ? <Shrink className="w-4 h-4" /> : <Expand className="w-4 h-4" />}
                     </Button>
+                    {!isFullscreen && (
+                        <Button
+                            onClick={() => setIsMinimized(true)}
+                            variant="ghost"
+                            size="icon"
+                            className="w-7 h-7"
+                        >
+                            <Minimize2 className="w-4 h-4" />
+                        </Button>
+                    )}
                     <Button
                         onClick={onEndCall}
                         variant="ghost"
@@ -285,13 +323,16 @@ export function VideoCallWindow({
             </div>
             
             {/* 视频区域 */}
-            <div className="relative bg-black aspect-video">
+            <div className={cn(
+                "relative bg-black",
+                isFullscreen ? "flex-1" : "aspect-video"
+            )}>
                 {/* 远端视频（主画面） */}
                 <video
-                    ref={remoteVideoRef}
+                    ref={setRemoteVideoRef}
                     autoPlay
                     playsInline
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                 />
                 {!remoteVideoEnabled && (
                     <div className="absolute inset-0 bg-gray-800 flex flex-col items-center justify-center">
@@ -305,9 +346,14 @@ export function VideoCallWindow({
                 )}
                 
                 {/* 本地视频（小画面） */}
-                <div className="absolute bottom-3 right-3 w-32 h-24 rounded-lg overflow-hidden border-2 border-white/30 shadow-lg">
+                <div className={cn(
+                    "absolute rounded-lg overflow-hidden border-2 border-white/30 shadow-lg",
+                    isFullscreen 
+                        ? "bottom-6 right-6 w-48 h-36" 
+                        : "bottom-3 right-3 w-32 h-24"
+                )}>
                     <video
-                        ref={localVideoRef}
+                        ref={setLocalVideoRef}
                         autoPlay
                         playsInline
                         muted

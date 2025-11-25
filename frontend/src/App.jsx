@@ -1075,8 +1075,9 @@ function ChatApp() {
                 }
             } else if (msg.type === 'file-start') {
                 await initFileReceive(remoteId, msg);
-            } else if (Object.values(CALL_MESSAGE_TYPES).includes(msg.type)) {
-                // 处理通话相关信令
+            } else if (Object.values(CALL_MESSAGE_TYPES).includes(msg.type) || 
+                       msg.type === 'video-offer' || msg.type === 'video-answer') {
+                // 处理通话相关信令（包括视频重新协商）
                 handleCallSignal(msg.type, remoteId, msg);
             } else {
                 // Normal chat or other signaling
@@ -1192,8 +1193,8 @@ function ChatApp() {
         isScreenSharing,
         remoteVideoEnabled,
         remoteAudioEnabled,
-        localStreamRef,
-        remoteStreamRef,
+        localStream,
+        remoteStream,
         startCall,
         acceptCall,
         rejectCall,
@@ -1901,8 +1902,8 @@ function ChatApp() {
             {/* 视频通话窗口 */}
             <VideoCallWindow
                 isOpen={callStatus === CALL_STATUS.CONNECTED}
-                localStream={localStreamRef.current}
-                remoteStream={remoteStreamRef.current}
+                localStream={localStream}
+                remoteStream={remoteStream}
                 remoteName={callRemoteUser ? getDisplayName(callRemoteUser) : ''}
                 isVideoEnabled={isVideoEnabled}
                 isAudioEnabled={isAudioEnabled}

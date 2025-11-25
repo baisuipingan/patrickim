@@ -45,7 +45,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
     const [remoteVideoEnabled, setRemoteVideoEnabled] = useState(true);
     const [remoteAudioEnabled, setRemoteAudioEnabled] = useState(true);
     
-    // 媒体流引用
+    // 媒体流状态（用于触发重新渲染）
+    const [localStream, setLocalStream] = useState(null);
+    const [remoteStream, setRemoteStream] = useState(null);
+    
+    // 使用 ref 存储状态，避免闭包陷阱
+    const callStatusRef = useRef(callStatus);
+    const remoteUserRef = useRef(remoteUser);
+    
+    // 同步 ref 和 state
+    callStatusRef.current = callStatus;
+    remoteUserRef.current = remoteUser;
+    
+    // 媒体流引用（内部使用）
     const localStreamRef = useRef(null);
     const remoteStreamRef = useRef(null);
     const screenStreamRef = useRef(null);
@@ -58,6 +70,22 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
      * 获取本地媒体流
      */
     const getLocalStream = useCallback(async (video = true, audio = true) => {
+        // 检查是否在安全上下文中
+        if (!window.isSecureContext) {
+            const msg = '⚠️ 摄像头/麦克风需要安全连接。请使用 localhost 或 HTTPS 访问，或在 Chrome 设置中添加例外：chrome://flags/#unsafely-treat-insecure-origin-as-secure';
+            log(msg);
+            alert(msg);
+            throw new Error('不安全的上下文');
+        }
+        
+        // 检查是否支持 mediaDevices API
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const msg = '❌ 浏览器不支持摄像头/麦克风访问';
+            log(msg);
+            alert(msg);
+            throw new Error('不支持 getUserMedia');
+        }
+        
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: video ? {
@@ -72,17 +100,25 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 } : false
             });
             localStreamRef.current = stream;
+            setLocalStream(stream); // 触发重新渲染
             return stream;
         } catch (error) {
-            log(`❌ 获取媒体设备失败: ${error.message}`);
+            let msg = `❌ 获取媒体设备失败: ${error.message}`;
+            if (error.name === 'NotAllowedError') {
+                msg = '❌ 摄像头/麦克风权限被拒绝，请在浏览器设置中允许';
+            } else if (error.name === 'NotFoundError') {
+                msg = '❌ 未检测到摄像头或麦克风设备';
+            }
+            log(msg);
+            alert(msg);
             throw error;
         }
     }, [log]);
     
     /**
-     * 添加媒体轨道到 PeerConnection
+     * 添加媒体轨道到 PeerConnection 并触发重新协商
      */
-    const addTracksToConnection = useCallback((stream, targetUserId) => {
+    const addTracksToConnection = useCallback(async (stream, targetUserId, initiateRenegotiation = false) => {
         const peer = peersRef.current[targetUserId];
         if (!peer || !peer.pc) {
             log(`⚠️ 未找到与 ${targetUserId} 的连接`);
@@ -90,10 +126,30 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         }
         
         stream.getTracks().forEach(track => {
-            peer.pc.addTrack(track, stream);
-            log(`🎥 添加 ${track.kind} 轨道到连接`);
+            // 检查是否已经添加过相同的轨道
+            const senders = peer.pc.getSenders();
+            const existingSender = senders.find(s => s.track === track);
+            if (!existingSender) {
+                peer.pc.addTrack(track, stream);
+                log(`🎥 添加 ${track.kind} 轨道到连接`);
+            }
         });
-    }, [peersRef, log]);
+        
+        // 如果需要发起重新协商（主叫方）
+        if (initiateRenegotiation) {
+            try {
+                log(`🔄 发起 SDP 重新协商...`);
+                const offer = await peer.pc.createOffer();
+                await peer.pc.setLocalDescription(offer);
+                // 通过 DataChannel 发送 offer
+                sendSignal('video-offer', targetUserId, {
+                    sdp: peer.pc.localDescription
+                });
+            } catch (error) {
+                log(`❌ 重新协商失败: ${error.message}`);
+            }
+        }
+    }, [peersRef, log, sendSignal]);
     
     /**
      * 设置远端轨道监听
@@ -108,6 +164,7 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 remoteStreamRef.current = new MediaStream();
             }
             remoteStreamRef.current.addTrack(event.track);
+            setRemoteStream(remoteStreamRef.current); // 触发重新渲染
         };
     }, [peersRef, log]);
     
@@ -152,7 +209,8 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
      * 处理来电
      */
     const handleIncomingCall = useCallback((fromUserId, payload) => {
-        if (callStatus !== CALL_STATUS.IDLE) {
+        // 使用 ref 获取最新状态
+        if (callStatusRef.current !== CALL_STATUS.IDLE) {
             // 已在通话中，回复忙线
             sendSignal(CALL_MESSAGE_TYPES.CALL_BUSY, fromUserId, {});
             log(`📵 收到 ${getDisplayName(fromUserId)} 的来电，但当前忙线`);
@@ -167,112 +225,10 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         
         // 播放来电铃声（可选）
         // playRingtone();
-    }, [callStatus, sendSignal, getDisplayName, log]);
+    }, [sendSignal, getDisplayName, log]);
     
     /**
-     * 接听来电
-     */
-    const acceptCall = useCallback(async () => {
-        if (callStatus !== CALL_STATUS.INCOMING || !remoteUser) {
-            log('⚠️ 无来电可接听');
-            return false;
-        }
-        
-        try {
-            // 获取本地媒体流
-            const stream = await getLocalStream(isVideoEnabled, true);
-            
-            // 设置远端轨道监听
-            setupRemoteTrackListener(remoteUser);
-            
-            // 添加轨道到连接
-            addTracksToConnection(stream, remoteUser);
-            
-            // 发送接听信令
-            sendSignal(CALL_MESSAGE_TYPES.CALL_ACCEPT, remoteUser, {
-                video: isVideoEnabled
-            });
-            
-            setCallStatus(CALL_STATUS.CONNECTED);
-            log(`✅ 已接听 ${getDisplayName(remoteUser)} 的通话`);
-            
-            // 停止铃声
-            // stopRingtone();
-            
-            return true;
-        } catch (error) {
-            log(`❌ 接听失败: ${error.message}`);
-            rejectCall();
-            return false;
-        }
-    }, [callStatus, remoteUser, isVideoEnabled, getLocalStream, setupRemoteTrackListener, addTracksToConnection, sendSignal, getDisplayName, log]);
-    
-    /**
-     * 处理对方接听
-     */
-    const handleCallAccepted = useCallback((fromUserId, payload) => {
-        if (callStatus !== CALL_STATUS.CALLING || remoteUser !== fromUserId) {
-            return;
-        }
-        
-        // 添加轨道到连接
-        if (localStreamRef.current) {
-            addTracksToConnection(localStreamRef.current, fromUserId);
-        }
-        
-        setCallStatus(CALL_STATUS.CONNECTED);
-        setRemoteVideoEnabled(payload.video);
-        log(`✅ ${getDisplayName(fromUserId)} 已接听通话`);
-    }, [callStatus, remoteUser, addTracksToConnection, getDisplayName, log]);
-    
-    /**
-     * 拒绝来电
-     */
-    const rejectCall = useCallback(() => {
-        if (remoteUser) {
-            sendSignal(CALL_MESSAGE_TYPES.CALL_REJECT, remoteUser, {});
-            log(`❌ 已拒绝 ${getDisplayName(remoteUser)} 的来电`);
-        }
-        
-        // 停止铃声
-        // stopRingtone();
-        
-        cleanupCall();
-    }, [remoteUser, sendSignal, getDisplayName, log]);
-    
-    /**
-     * 处理对方拒绝
-     */
-    const handleCallRejected = useCallback((fromUserId) => {
-        if (callStatus === CALL_STATUS.CALLING && remoteUser === fromUserId) {
-            log(`📵 ${getDisplayName(fromUserId)} 拒绝了通话`);
-            cleanupCall();
-        }
-    }, [callStatus, remoteUser, getDisplayName, log]);
-    
-    /**
-     * 结束通话
-     */
-    const endCall = useCallback(() => {
-        if (remoteUser) {
-            sendSignal(CALL_MESSAGE_TYPES.CALL_END, remoteUser, {});
-            log(`📴 已结束与 ${getDisplayName(remoteUser)} 的通话`);
-        }
-        cleanupCall();
-    }, [remoteUser, sendSignal, getDisplayName, log]);
-    
-    /**
-     * 处理对方结束通话
-     */
-    const handleCallEnded = useCallback((fromUserId) => {
-        if (remoteUser === fromUserId) {
-            log(`📴 ${getDisplayName(fromUserId)} 结束了通话`);
-            cleanupCall();
-        }
-    }, [remoteUser, getDisplayName, log]);
-    
-    /**
-     * 清理通话资源
+     * 清理通话资源（必须在 acceptCall/rejectCall 等函数之前定义）
      */
     const cleanupCall = useCallback(() => {
         // 停止本地媒体流
@@ -299,7 +255,121 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         setIsScreenSharing(false);
         setRemoteVideoEnabled(true);
         setRemoteAudioEnabled(true);
+        setLocalStream(null);
+        setRemoteStream(null);
     }, []);
+    
+    /**
+     * 接听来电
+     */
+    const acceptCall = useCallback(async () => {
+        // 使用 ref 获取最新状态
+        const currentRemoteUser = remoteUserRef.current;
+        if (callStatusRef.current !== CALL_STATUS.INCOMING || !currentRemoteUser) {
+            log('⚠️ 无来电可接听');
+            return false;
+        }
+        
+        try {
+            // 获取本地媒体流
+            const stream = await getLocalStream(isVideoEnabled, true);
+            
+            // 设置远端轨道监听
+            setupRemoteTrackListener(currentRemoteUser);
+            
+            // 添加轨道到连接
+            addTracksToConnection(stream, currentRemoteUser);
+            
+            // 发送接听信令
+            sendSignal(CALL_MESSAGE_TYPES.CALL_ACCEPT, currentRemoteUser, {
+                video: isVideoEnabled
+            });
+            
+            setCallStatus(CALL_STATUS.CONNECTED);
+            log(`✅ 已接听 ${getDisplayName(currentRemoteUser)} 的通话`);
+            
+            // 停止铃声
+            // stopRingtone();
+            
+            return true;
+        } catch (error) {
+            log(`❌ 接听失败: ${error.message}`);
+            // 接听失败时直接清理资源（不发拒绝信令，因为还没成功建立连接）
+            cleanupCall();
+            return false;
+        }
+    }, [isVideoEnabled, getLocalStream, setupRemoteTrackListener, addTracksToConnection, sendSignal, getDisplayName, log, cleanupCall]);
+    
+    /**
+     * 处理对方接听
+     */
+    const handleCallAccepted = useCallback(async (fromUserId, payload) => {
+        // 使用 ref 获取最新状态，避免闭包陷阱
+        if (callStatusRef.current !== CALL_STATUS.CALLING || remoteUserRef.current !== fromUserId) {
+            log(`⚠️ 忽略接听信令: status=${callStatusRef.current}, remoteUser=${remoteUserRef.current}, from=${fromUserId}`);
+            return;
+        }
+        
+        // 添加轨道到连接，并发起重新协商（发送端负责发起）
+        if (localStreamRef.current) {
+            await addTracksToConnection(localStreamRef.current, fromUserId, true);
+        }
+        
+        setCallStatus(CALL_STATUS.CONNECTED);
+        setRemoteVideoEnabled(payload.video);
+        log(`✅ ${getDisplayName(fromUserId)} 已接听通话`);
+    }, [addTracksToConnection, getDisplayName, log]);
+    
+    /**
+     * 拒绝来电
+     */
+    const rejectCall = useCallback(() => {
+        // 使用 ref 获取最新状态
+        const currentRemoteUser = remoteUserRef.current;
+        if (currentRemoteUser) {
+            sendSignal(CALL_MESSAGE_TYPES.CALL_REJECT, currentRemoteUser, {});
+            log(`❌ 已拒绝 ${getDisplayName(currentRemoteUser)} 的来电`);
+        }
+        
+        // 停止铃声
+        // stopRingtone();
+        
+        cleanupCall();
+    }, [sendSignal, getDisplayName, log, cleanupCall]);
+    
+    /**
+     * 处理对方拒绝
+     */
+    const handleCallRejected = useCallback((fromUserId) => {
+        // 使用 ref 获取最新状态
+        if (callStatusRef.current === CALL_STATUS.CALLING && remoteUserRef.current === fromUserId) {
+            log(`📵 ${getDisplayName(fromUserId)} 拒绝了通话`);
+            cleanupCall();
+        }
+    }, [getDisplayName, log, cleanupCall]);
+    
+    /**
+     * 结束通话
+     */
+    const endCall = useCallback(() => {
+        // 使用 ref 获取最新状态
+        if (remoteUserRef.current) {
+            sendSignal(CALL_MESSAGE_TYPES.CALL_END, remoteUserRef.current, {});
+            log(`📴 已结束与 ${getDisplayName(remoteUserRef.current)} 的通话`);
+        }
+        cleanupCall();
+    }, [sendSignal, getDisplayName, log, cleanupCall]);
+    
+    /**
+     * 处理对方结束通话
+     */
+    const handleCallEnded = useCallback((fromUserId) => {
+        // 使用 ref 获取最新状态
+        if (remoteUserRef.current === fromUserId) {
+            log(`📴 ${getDisplayName(fromUserId)} 结束了通话`);
+            cleanupCall();
+        }
+    }, [getDisplayName, log, cleanupCall]);
     
     /**
      * 切换视频开关
@@ -349,7 +419,9 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
      * 开始屏幕共享
      */
     const startScreenShare = useCallback(async () => {
-        if (!remoteUser || callStatus !== CALL_STATUS.CONNECTED) {
+        // 使用 ref 获取最新状态
+        const currentRemoteUser = remoteUserRef.current;
+        if (!currentRemoteUser || callStatusRef.current !== CALL_STATUS.CONNECTED) {
             log('⚠️ 需要在通话中才能共享屏幕');
             return false;
         }
@@ -368,15 +440,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             }
             
             // 替换视频轨道
-            const peer = peersRef.current[remoteUser];
+            const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
                 const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(screenStream.getVideoTracks()[0]);
+                    log('🔄 已替换视频轨道为屏幕共享');
                 }
             }
             
-            // 监听屏幕共享结束
+            // 更新本地预览显示屏幕共享内容
+            setLocalStream(screenStream);
+            
+            // 监听屏幕共享结束（用户点击浏览器的停止共享按钮）
             screenStream.getVideoTracks()[0].onended = () => {
                 stopScreenShare();
             };
@@ -384,7 +460,7 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             setIsScreenSharing(true);
             
             // 通知对方
-            sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_START, remoteUser, {});
+            sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_START, currentRemoteUser, {});
             
             log('🖥️ 屏幕共享已开始');
             return true;
@@ -392,7 +468,7 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             log(`❌ 屏幕共享失败: ${error.message}`);
             return false;
         }
-    }, [remoteUser, callStatus, peersRef, sendSignal, log]);
+    }, [peersRef, sendSignal, log]);
     
     /**
      * 停止屏幕共享
@@ -406,26 +482,79 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             screenStreamRef.current = null;
         }
         
+        // 使用 ref 获取最新的 remoteUser
+        const currentRemoteUser = remoteUserRef.current;
+        
         // 恢复原始视频轨道
-        if (originalVideoTrackRef.current && remoteUser) {
-            const peer = peersRef.current[remoteUser];
+        if (originalVideoTrackRef.current && currentRemoteUser) {
+            const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
                 const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(originalVideoTrackRef.current);
                 }
             }
+            
+            // 恢复本地预览为摄像头
+            if (localStreamRef.current) {
+                setLocalStream(localStreamRef.current);
+            }
         }
         
         setIsScreenSharing(false);
         
         // 通知对方
-        if (remoteUser) {
-            sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_STOP, remoteUser, {});
+        if (currentRemoteUser) {
+            sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_STOP, currentRemoteUser, {});
         }
         
         log('🖥️ 屏幕共享已停止');
-    }, [isScreenSharing, remoteUser, peersRef, sendSignal, log]);
+    }, [isScreenSharing, peersRef, sendSignal, log]);
+    
+    /**
+     * 处理视频 offer（接收端收到发送端的重新协商请求）
+     */
+    const handleVideoOffer = useCallback(async (fromUserId, payload) => {
+        const peer = peersRef.current[fromUserId];
+        if (!peer || !peer.pc) {
+            log(`⚠️ 收到 video-offer 但未找到连接`);
+            return;
+        }
+        
+        try {
+            log(`📥 收到视频 offer，正在处理...`);
+            await peer.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            const answer = await peer.pc.createAnswer();
+            await peer.pc.setLocalDescription(answer);
+            
+            // 发送 answer
+            sendSignal('video-answer', fromUserId, {
+                sdp: peer.pc.localDescription
+            });
+            log(`📤 已发送视频 answer`);
+        } catch (error) {
+            log(`❌ 处理 video-offer 失败: ${error.message}`);
+        }
+    }, [peersRef, sendSignal, log]);
+    
+    /**
+     * 处理视频 answer（发送端收到接收端的回应）
+     */
+    const handleVideoAnswer = useCallback(async (fromUserId, payload) => {
+        const peer = peersRef.current[fromUserId];
+        if (!peer || !peer.pc) {
+            log(`⚠️ 收到 video-answer 但未找到连接`);
+            return;
+        }
+        
+        try {
+            log(`📥 收到视频 answer，正在处理...`);
+            await peer.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            log(`✅ 视频连接已建立`);
+        } catch (error) {
+            log(`❌ 处理 video-answer 失败: ${error.message}`);
+        }
+    }, [peersRef, log]);
     
     /**
      * 处理通话相关信令消息
@@ -460,8 +589,15 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             case CALL_MESSAGE_TYPES.SCREEN_SHARE_STOP:
                 log(`🖥️ ${getDisplayName(fromUserId)} 停止了屏幕共享`);
                 break;
+            // 视频重新协商信令
+            case 'video-offer':
+                handleVideoOffer(fromUserId, payload);
+                break;
+            case 'video-answer':
+                handleVideoAnswer(fromUserId, payload);
+                break;
         }
-    }, [handleIncomingCall, handleCallAccepted, handleCallRejected, handleCallEnded, cleanupCall, getDisplayName, log]);
+    }, [handleIncomingCall, handleCallAccepted, handleCallRejected, handleCallEnded, cleanupCall, getDisplayName, log, handleVideoOffer, handleVideoAnswer]);
     
     return {
         // 状态
@@ -473,9 +609,9 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         remoteVideoEnabled,
         remoteAudioEnabled,
         
-        // 流引用
-        localStreamRef,
-        remoteStreamRef,
+        // 媒体流（state，触发重新渲染）
+        localStream,
+        remoteStream,
         
         // 方法
         startCall,
