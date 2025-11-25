@@ -439,13 +439,25 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 originalVideoTrackRef.current = localStreamRef.current.getVideoTracks()[0];
             }
             
-            // 替换视频轨道
+            // 替换视频轨道并重新协商
             const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
                 const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(screenStream.getVideoTracks()[0]);
                     log('🔄 已替换视频轨道为屏幕共享');
+                    
+                    // 重新协商 SDP（屏幕分辨率可能与摄像头不同）
+                    try {
+                        const offer = await peer.pc.createOffer();
+                        await peer.pc.setLocalDescription(offer);
+                        sendSignal('video-offer', currentRemoteUser, {
+                            sdp: peer.pc.localDescription
+                        });
+                        log('🔄 已发送屏幕共享重新协商');
+                    } catch (err) {
+                        log(`⚠️ 屏幕共享重新协商失败: ${err.message}`);
+                    }
                 }
             }
             
@@ -492,6 +504,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(originalVideoTrackRef.current);
+                    
+                    // 重新协商 SDP（切回摄像头分辨率）
+                    try {
+                        const offer = await peer.pc.createOffer();
+                        await peer.pc.setLocalDescription(offer);
+                        sendSignal('video-offer', currentRemoteUser, {
+                            sdp: peer.pc.localDescription
+                        });
+                    } catch (err) {
+                        log(`⚠️ 停止共享重新协商失败: ${err.message}`);
+                    }
                 }
             }
             
