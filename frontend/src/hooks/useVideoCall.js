@@ -231,6 +231,22 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
      * 清理通话资源（必须在 acceptCall/rejectCall 等函数之前定义）
      */
     const cleanupCall = useCallback(() => {
+        // 移除 PeerConnection 上的媒体轨道（保留 DataChannel）
+        const currentRemoteUser = remoteUserRef.current;
+        if (currentRemoteUser && peersRef.current[currentRemoteUser]) {
+            const pc = peersRef.current[currentRemoteUser].pc;
+            if (pc) {
+                // 移除所有媒体发送器
+                pc.getSenders().forEach(sender => {
+                    if (sender.track) {
+                        pc.removeTrack(sender);
+                    }
+                });
+                // 清除 ontrack 监听器
+                pc.ontrack = null;
+            }
+        }
+        
         // 停止本地媒体流
         if (localStreamRef.current) {
             localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -257,7 +273,7 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         setRemoteAudioEnabled(true);
         setLocalStream(null);
         setRemoteStream(null);
-    }, []);
+    }, [peersRef]);
     
     /**
      * 接听来电
@@ -382,16 +398,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             videoTrack.enabled = !videoTrack.enabled;
             setIsVideoEnabled(videoTrack.enabled);
             
-            // 通知对方
-            if (remoteUser) {
-                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_VIDEO, remoteUser, {
+            // 通知对方（使用 ref 获取最新状态）
+            const currentRemoteUser = remoteUserRef.current;
+            if (currentRemoteUser) {
+                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_VIDEO, currentRemoteUser, {
                     enabled: videoTrack.enabled
                 });
             }
             
             log(`📹 视频已${videoTrack.enabled ? '开启' : '关闭'}`);
         }
-    }, [remoteUser, sendSignal, log]);
+    }, [sendSignal, log]);
     
     /**
      * 切换音频开关
@@ -404,16 +421,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             audioTrack.enabled = !audioTrack.enabled;
             setIsAudioEnabled(audioTrack.enabled);
             
-            // 通知对方
-            if (remoteUser) {
-                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_AUDIO, remoteUser, {
+            // 通知对方（使用 ref 获取最新状态）
+            const currentRemoteUser = remoteUserRef.current;
+            if (currentRemoteUser) {
+                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_AUDIO, currentRemoteUser, {
                     enabled: audioTrack.enabled
                 });
             }
             
-            log(`🎤 麦克风已${audioTrack.enabled ? '开启' : '静音'}`);
+            log(`🎙️ 麦克风已${audioTrack.enabled ? '开启' : '静音'}`);
         }
-    }, [remoteUser, sendSignal, log]);
+    }, [sendSignal, log]);
     
     /**
      * 开始屏幕共享
@@ -567,20 +585,11 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         try {
             log(`📥 收到视频 offer，signalingState=${pc.signalingState}`);
             
-            // 如果当前不是 stable 状态，可能存在竞争，需要回滚
+            // 如果当前不是 stable 状态，等待或回滚
             if (pc.signalingState !== 'stable') {
-                log(`⚠️ 信令状态非 stable，等待稳定后处理...`);
-                // 等待状态稳定
-                await new Promise(resolve => {
-                    const checkState = () => {
-                        if (pc.signalingState === 'stable') {
-                            resolve();
-                        } else {
-                            setTimeout(checkState, 100);
-                        }
-                    };
-                    setTimeout(checkState, 100);
-                });
+                log(`⚠️ 信令状态非 stable (${pc.signalingState})，尝试回滚...`);
+                // 回滚当前的本地描述
+                await pc.setLocalDescription({ type: 'rollback' });
             }
             
             await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
