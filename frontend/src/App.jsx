@@ -14,7 +14,9 @@ import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Badge } from './components/ui/badge';
 import { Avatar, AvatarFallback } from './components/ui/avatar';
-import { Menu, Globe, Edit2, X, Trash2, Upload } from 'lucide-react';
+import { Menu, Globe, Edit2, X, Trash2, Upload, Video, Phone } from 'lucide-react';
+import { useVideoCall, CALL_STATUS, CALL_MESSAGE_TYPES } from './hooks/useVideoCall';
+import { IncomingCallModal, CallingModal, VideoCallWindow, CallButton } from './components/VideoCall';
 import { cn } from './lib/utils';
 
 class ErrorBoundary extends Component {
@@ -1073,6 +1075,9 @@ function ChatApp() {
                 }
             } else if (msg.type === 'file-start') {
                 await initFileReceive(remoteId, msg);
+            } else if (Object.values(CALL_MESSAGE_TYPES).includes(msg.type)) {
+                // 处理通话相关信令
+                handleCallSignal(msg.type, remoteId, msg);
             } else {
                 // Normal chat or other signaling
                 if (!msg.mode) {
@@ -1166,6 +1171,46 @@ function ChatApp() {
             wsRef.current.send(JSON.stringify({ type, to, payload }));
         }
     };
+    
+    // 发送 DataChannel 消息（用于通话信令等）
+    // 参数格式与 WebSocket sendSignal 保持一致: (type, targetUserId, payload)
+    const sendDataChannelMessage = (type, targetUserId, payload) => {
+        const peer = peersRef.current[targetUserId];
+        if (peer && peer.dc && peer.dc.readyState === 'open') {
+            peer.dc.send(JSON.stringify({ type, ...payload }));
+            return true;
+        }
+        return false;
+    };
+    
+    // 音视频通话 Hook
+    const {
+        callStatus,
+        remoteUser: callRemoteUser,
+        isVideoEnabled,
+        isAudioEnabled,
+        isScreenSharing,
+        remoteVideoEnabled,
+        remoteAudioEnabled,
+        localStreamRef,
+        remoteStreamRef,
+        startCall,
+        acceptCall,
+        rejectCall,
+        endCall,
+        toggleVideo,
+        toggleAudio,
+        startScreenShare,
+        stopScreenShare,
+        handleCallSignal,
+        cleanupCall
+    } = useVideoCall({
+        peersRef,
+        sendSignal: sendDataChannelMessage, // 通话信令通过 DataChannel 发送
+        log,
+        myId: myIdRef.current,
+        getDisplayName
+    });
 
     const sendMessage = () => {
         // 检查是否有消息或文件要发送
@@ -1517,6 +1562,33 @@ function ChatApp() {
                                 )}
                             </div>
                         </div>
+                        
+                        {/* 通话按钮 - 仅在私聊时显示 */}
+                        {activeUser !== null && connectionStatus[activeUser]?.status === 'connected' && (
+                            <div className="flex gap-1 shrink-0">
+                                <Button
+                                    onClick={() => startCall(activeUser, false)}
+                                    disabled={callStatus !== CALL_STATUS.IDLE}
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-8 w-8 p-0"
+                                    title="语音通话"
+                                >
+                                    <Phone className="w-4 h-4" />
+                                </Button>
+                                <Button
+                                    onClick={() => startCall(activeUser, true)}
+                                    disabled={callStatus !== CALL_STATUS.IDLE}
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-8 w-8 p-0"
+                                    title="视频通话"
+                                >
+                                    <Video className="w-4 h-4" />
+                                </Button>
+                            </div>
+                        )}
+                        
                         <Button 
                             onClick={handleClearHistory}
                             size="sm"
@@ -1809,6 +1881,39 @@ function ChatApp() {
                     </div>
                 </div>
             )}
+            
+            {/* 来电弹窗 */}
+            <IncomingCallModal
+                isOpen={callStatus === CALL_STATUS.INCOMING}
+                callerName={callRemoteUser ? getDisplayName(callRemoteUser) : ''}
+                isVideoCall={isVideoEnabled}
+                onAccept={acceptCall}
+                onReject={rejectCall}
+            />
+            
+            {/* 呼叫中弹窗 */}
+            <CallingModal
+                isOpen={callStatus === CALL_STATUS.CALLING}
+                calleeName={callRemoteUser ? getDisplayName(callRemoteUser) : ''}
+                onCancel={endCall}
+            />
+            
+            {/* 视频通话窗口 */}
+            <VideoCallWindow
+                isOpen={callStatus === CALL_STATUS.CONNECTED}
+                localStream={localStreamRef.current}
+                remoteStream={remoteStreamRef.current}
+                remoteName={callRemoteUser ? getDisplayName(callRemoteUser) : ''}
+                isVideoEnabled={isVideoEnabled}
+                isAudioEnabled={isAudioEnabled}
+                isScreenSharing={isScreenSharing}
+                remoteVideoEnabled={remoteVideoEnabled}
+                onEndCall={endCall}
+                onToggleVideo={toggleVideo}
+                onToggleAudio={toggleAudio}
+                onStartScreenShare={startScreenShare}
+                onStopScreenShare={stopScreenShare}
+            />
         </div>
     );
 }

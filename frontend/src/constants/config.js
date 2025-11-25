@@ -47,7 +47,18 @@ export const MESSAGE_TYPES = {
     
     // 聊天消息
     TEXT: 'text',
-    FILE: 'file'
+    FILE: 'file',
+    
+    // 音视频通话消息
+    CALL_REQUEST: 'call-request',
+    CALL_ACCEPT: 'call-accept',
+    CALL_REJECT: 'call-reject',
+    CALL_END: 'call-end',
+    CALL_BUSY: 'call-busy',
+    TOGGLE_VIDEO: 'toggle-video',
+    TOGGLE_AUDIO: 'toggle-audio',
+    SCREEN_SHARE_START: 'screen-share-start',
+    SCREEN_SHARE_STOP: 'screen-share-stop'
 };
 
 /**
