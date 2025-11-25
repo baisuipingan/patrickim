@@ -390,25 +390,66 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
     /**
      * 切换视频开关
      */
-    const toggleVideo = useCallback(() => {
-        if (!localStreamRef.current) return;
+    const toggleVideo = useCallback(async () => {
+        const currentRemoteUser = remoteUserRef.current;
+        if (callStatusRef.current !== CALL_STATUS.CONNECTED || !currentRemoteUser) {
+            log('⚠️ 需要在通话中才能切换视频');
+            return;
+        }
         
-        const videoTrack = localStreamRef.current.getVideoTracks()[0];
+        const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+        
         if (videoTrack) {
+            // 已有视频轨道，切换 enabled
             videoTrack.enabled = !videoTrack.enabled;
             setIsVideoEnabled(videoTrack.enabled);
             
-            // 通知对方（使用 ref 获取最新状态）
-            const currentRemoteUser = remoteUserRef.current;
-            if (currentRemoteUser) {
-                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_VIDEO, currentRemoteUser, {
-                    enabled: videoTrack.enabled
-                });
-            }
+            sendSignal(CALL_MESSAGE_TYPES.TOGGLE_VIDEO, currentRemoteUser, {
+                enabled: videoTrack.enabled
+            });
             
             log(`📹 视频已${videoTrack.enabled ? '开启' : '关闭'}`);
+        } else {
+            // 没有视频轨道（语音通话），需要获取摄像头并添加
+            try {
+                log('📹 正在开启摄像头...');
+                const videoStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
+                });
+                
+                const newVideoTrack = videoStream.getVideoTracks()[0];
+                
+                // 添加到本地流
+                if (localStreamRef.current) {
+                    localStreamRef.current.addTrack(newVideoTrack);
+                } else {
+                    localStreamRef.current = videoStream;
+                }
+                setLocalStream(localStreamRef.current);
+                
+                // 添加到 PeerConnection 并重新协商
+                const peer = peersRef.current[currentRemoteUser];
+                if (peer && peer.pc) {
+                    const pc = peer.pc;
+                    pc.addTrack(newVideoTrack, localStreamRef.current);
+                    
+                    // 重新协商
+                    await new Promise(r => setTimeout(r, 100));
+                    if (pc.signalingState === 'stable') {
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        sendSignal('video-offer', currentRemoteUser, { sdp: pc.localDescription });
+                    }
+                }
+                
+                setIsVideoEnabled(true);
+                sendSignal(CALL_MESSAGE_TYPES.TOGGLE_VIDEO, currentRemoteUser, { enabled: true });
+                log('📹 摄像头已开启');
+            } catch (error) {
+                log(`❌ 开启摄像头失败: ${error.message}`);
+            }
         }
-    }, [sendSignal, log]);
+    }, [peersRef, sendSignal, log]);
     
     /**
      * 切换音频开关
