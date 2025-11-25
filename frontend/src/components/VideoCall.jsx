@@ -324,7 +324,7 @@ export function VideoCallWindow({
             
             {/* 视频区域 */}
             <div className={cn(
-                "relative bg-black",
+                "relative bg-black flex items-center justify-center",
                 isFullscreen ? "flex-1" : "aspect-video"
             )}>
                 {/* 远端视频（主画面） */}
@@ -332,7 +332,10 @@ export function VideoCallWindow({
                     ref={setRemoteVideoRef}
                     autoPlay
                     playsInline
-                    className="w-full h-full object-contain"
+                    className={cn(
+                        "object-contain",
+                        isFullscreen ? "max-w-full max-h-full" : "w-full h-full"
+                    )}
                 />
                 {!remoteVideoEnabled && (
                     <div className="absolute inset-0 bg-gray-800 flex flex-col items-center justify-center">
@@ -346,12 +349,13 @@ export function VideoCallWindow({
                 )}
                 
                 {/* 本地视频（小画面） */}
-                <div className={cn(
-                    "absolute rounded-lg overflow-hidden border-2 border-white/30 shadow-lg",
-                    isFullscreen 
-                        ? "bottom-6 right-6 w-48 h-36" 
-                        : "bottom-3 right-3 w-32 h-24"
-                )}>
+                <div 
+                    className={cn(
+                        "absolute rounded-lg overflow-hidden border-2 border-white/30 shadow-lg",
+                        isFullscreen ? "bottom-20 right-6" : "bottom-3 right-3"
+                    )}
+                    style={isFullscreen ? { width: 224, height: 168 } : { width: 128, height: 96 }}
+                >
                     <video
                         ref={setLocalVideoRef}
                         autoPlay
