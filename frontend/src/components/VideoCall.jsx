@@ -146,6 +146,9 @@ export function VideoCallWindow({
     const [isDragging, setIsDragging] = useState(false);
     const dragStartRef = useRef({ x: 0, y: 0 });
     
+    // 检测是否支持屏幕共享（iOS 不支持）
+    const supportsScreenShare = !!navigator.mediaDevices?.getDisplayMedia;
+    
     // 切换全屏
     const toggleFullscreen = () => {
         setIsFullscreen(!isFullscreen);
@@ -392,16 +395,18 @@ export function VideoCallWindow({
                     {isVideoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
                 </Button>
                 
-                {/* 屏幕共享 */}
-                <Button
-                    onClick={isScreenSharing ? onStopScreenShare : onStartScreenShare}
-                    variant={isScreenSharing ? "default" : "secondary"}
-                    size="icon"
-                    className="rounded-full w-12 h-12"
-                    title={isScreenSharing ? "停止共享" : "共享屏幕"}
-                >
-                    {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
-                </Button>
+                {/* 屏幕共享（仅支持的设备显示） */}
+                {supportsScreenShare && (
+                    <Button
+                        onClick={isScreenSharing ? onStopScreenShare : onStartScreenShare}
+                        variant={isScreenSharing ? "default" : "secondary"}
+                        size="icon"
+                        className="rounded-full w-12 h-12"
+                        title={isScreenSharing ? "停止共享" : "共享屏幕"}
+                    >
+                        {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+                    </Button>
+                )}
                 
                 {/* 挂断 */}
                 <Button
