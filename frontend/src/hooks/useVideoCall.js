@@ -516,35 +516,41 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 originalVideoTrackRef.current = localStreamRef.current.getVideoTracks()[0];
             }
             
-            // 替换视频轨道并重新协商
+            // 替换或添加视频轨道并重新协商
             const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
                 const pc = peer.pc;
+                const screenVideoTrack = screenStream.getVideoTracks()[0];
                 const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                
                 if (sender) {
-                    await sender.replaceTrack(screenStream.getVideoTracks()[0]);
+                    // 有现有视频轨道，替换
+                    await sender.replaceTrack(screenVideoTrack);
                     log('🔄 已替换视频轨道为屏幕共享');
-                    
-                    // 等待一帧确保轨道替换生效
-                    await new Promise(r => setTimeout(r, 100));
-                    
-                    // 重新协商 SDP（屏幕分辨率可能与摄像头不同）
-                    try {
-                        // 确保信令状态稳定
-                        if (pc.signalingState !== 'stable') {
-                            log(`⚠️ 等待信令状态稳定: ${pc.signalingState}`);
-                            await new Promise(r => setTimeout(r, 500));
-                        }
-                        
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        sendSignal('video-offer', currentRemoteUser, {
-                            sdp: pc.localDescription
-                        });
-                        log('🔄 已发送屏幕共享重新协商');
-                    } catch (err) {
-                        log(`⚠️ 屏幕共享重新协商失败: ${err.message}`);
+                } else {
+                    // 没有视频轨道（仅接收模式），添加新轨道
+                    pc.addTrack(screenVideoTrack, screenStream);
+                    log('🔄 已添加屏幕共享视频轨道');
+                }
+                
+                // 等待一帧确保轨道变更生效
+                await new Promise(r => setTimeout(r, 100));
+                
+                // 重新协商 SDP
+                try {
+                    if (pc.signalingState !== 'stable') {
+                        log(`⚠️ 等待信令状态稳定: ${pc.signalingState}`);
+                        await new Promise(r => setTimeout(r, 500));
                     }
+                    
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    sendSignal('video-offer', currentRemoteUser, {
+                        sdp: pc.localDescription
+                    });
+                    log('🔄 已发送屏幕共享重新协商');
+                } catch (err) {
+                    log(`⚠️ 屏幕共享重新协商失败: ${err.message}`);
                 }
             }
             
@@ -584,39 +590,45 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         // 使用 ref 获取最新的 remoteUser
         const currentRemoteUser = remoteUserRef.current;
         
-        // 恢复原始视频轨道
-        if (originalVideoTrackRef.current && currentRemoteUser) {
-            const peer = peersRef.current[currentRemoteUser];
-            if (peer && peer.pc) {
-                const pc = peer.pc;
-                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-                if (sender) {
-                    await sender.replaceTrack(originalVideoTrackRef.current);
-                    
-                    // 等待一帧确保轨道替换生效
-                    await new Promise(r => setTimeout(r, 100));
-                    
-                    // 重新协商 SDP（切回摄像头分辨率）
-                    try {
-                        if (pc.signalingState !== 'stable') {
-                            await new Promise(r => setTimeout(r, 500));
-                        }
-                        
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        sendSignal('video-offer', currentRemoteUser, {
-                            sdp: pc.localDescription
-                        });
-                    } catch (err) {
-                        log(`⚠️ 停止共享重新协商失败: ${err.message}`);
-                    }
-                }
+        const peer = currentRemoteUser ? peersRef.current[currentRemoteUser] : null;
+        if (peer && peer.pc) {
+            const pc = peer.pc;
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            
+            if (originalVideoTrackRef.current && sender) {
+                // 有原始视频轨道，替换回去
+                await sender.replaceTrack(originalVideoTrackRef.current);
+                log('🔄 已恢复摄像头视频轨道');
+            } else if (sender) {
+                // 没有原始轨道（仅接收模式），移除视频轨道
+                pc.removeTrack(sender);
+                log('🔄 已移除屏幕共享视频轨道');
             }
             
-            // 恢复本地预览为摄像头
-            if (localStreamRef.current) {
-                setLocalStream(localStreamRef.current);
+            // 等待一帧确保轨道变更生效
+            await new Promise(r => setTimeout(r, 100));
+            
+            // 重新协商 SDP
+            try {
+                if (pc.signalingState !== 'stable') {
+                    await new Promise(r => setTimeout(r, 500));
+                }
+                
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                sendSignal('video-offer', currentRemoteUser, {
+                    sdp: pc.localDescription
+                });
+            } catch (err) {
+                log(`⚠️ 停止共享重新协商失败: ${err.message}`);
             }
+        }
+        
+        // 恢复本地预览
+        if (localStreamRef.current) {
+            setLocalStream(localStreamRef.current);
+        } else {
+            setLocalStream(new MediaStream());
         }
         
         setIsScreenSharing(false);
