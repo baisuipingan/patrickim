@@ -14,7 +14,7 @@ import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Badge } from './components/ui/badge';
 import { Avatar, AvatarFallback } from './components/ui/avatar';
-import { Menu, Globe, Edit2, X, Trash2 } from 'lucide-react';
+import { Menu, Globe, Edit2, X, Trash2, Upload } from 'lucide-react';
 import { cn } from './lib/utils';
 
 class ErrorBoundary extends Component {
@@ -121,6 +121,44 @@ function ChatApp() {
     const firstUnreadRef = useRef(null); // 第一条未读消息的 ref
     const scrollTimeoutRef = useRef(null); // 滚动防抖定时器
     
+    const [isDragging, setIsDragging] = useState(false);
+    const dragCounter = useRef(0);
+
+    const handleDragEnter = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current++;
+        if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+            setIsDragging(true);
+        }
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current--;
+        if (dragCounter.current === 0) {
+            setIsDragging(false);
+        }
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+        dragCounter.current = 0;
+        
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length > 0) {
+            setPendingFiles(prev => [...prev, ...files]);
+        }
+    };
+
     // 同步 activeUser 到 ref
     useEffect(() => {
         activeUserRef.current = activeUser;
@@ -1246,7 +1284,25 @@ function ChatApp() {
     }
 
     return (
-        <div className="w-full h-screen bg-gray-50">
+        <div 
+            className="w-full h-screen bg-slate-50 relative"
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+        >
+            {/* Drag & Drop Overlay */}
+            {isDragging && (
+                <div className="absolute inset-0 z-50 bg-slate-900/50 flex items-center justify-center backdrop-blur-sm border-4 border-dashed border-blue-500 m-4 rounded-xl pointer-events-none">
+                    <div className="text-white text-xl font-medium flex flex-col items-center gap-4">
+                        <div className="p-4 bg-blue-500/20 rounded-full">
+                            <Upload className="w-16 h-16 text-blue-400" />
+                        </div>
+                        <span>释放文件以添加到发送列表</span>
+                    </div>
+                </div>
+            )}
+
             <div className="w-full h-full flex relative">
                 {/* Left Side: User List */}
                 <div className={cn(
@@ -1277,10 +1333,10 @@ function ChatApp() {
                             className={cn(
                                 "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                 activeUser === null 
-                                    ? "bg-gray-900 text-white" 
+                                    ? "bg-[#0f172a] text-white" 
                                     : unreadCounts['__global__'] > 0
-                                        ? "hover:bg-gray-100 text-gray-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
-                                        : "hover:bg-gray-100 text-gray-900"
+                                        ? "hover:bg-slate-100 text-slate-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                        : "hover:bg-slate-100 text-slate-900"
                             )}
                             onClick={() => {
                                 switchToUser(null);
@@ -1291,9 +1347,9 @@ function ChatApp() {
                                 "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
                                 activeUser === null 
                                     ? "bg-white/10" 
-                                    : "bg-gray-100"
+                                    : "bg-slate-100"
                             )}>
-                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white" : "text-gray-600")} />
+                                <Globe className={cn("w-5 h-5", activeUser === null ? "text-white" : "text-slate-600")} />
                             </div>
                             <div className="flex flex-col flex-1 min-w-0">
                                 <span className="text-sm font-medium truncate">
@@ -1301,7 +1357,7 @@ function ChatApp() {
                                 </span>
                                 <span className={cn(
                                     "text-xs",
-                                    activeUser === null ? "text-white/70" : "text-gray-500"
+                                    activeUser === null ? "text-white/70" : "text-slate-500"
                                 )}>
                                     Everyone
                                 </span>
@@ -1335,10 +1391,10 @@ function ChatApp() {
                                     className={cn(
                                         "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all cursor-pointer relative",
                                         activeUser === user 
-                                            ? "bg-gray-900 text-white" 
+                                            ? "bg-[#0f172a] text-white" 
                                             : unreadCount > 0
-                                                ? "hover:bg-gray-100 text-gray-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
-                                                : "hover:bg-gray-100 text-gray-900"
+                                                ? "hover:bg-slate-100 text-slate-900 ring-2 ring-green-400 shadow-lg shadow-green-200/50"
+                                                : "hover:bg-slate-100 text-slate-900"
                                     )}
                                     onClick={() => {
                                         switchToUser(user);
@@ -1350,17 +1406,17 @@ function ChatApp() {
                                             "w-9 h-9 rounded-lg flex items-center justify-center font-semibold text-xs",
                                             activeUser === user 
                                                 ? "bg-white/10 text-white" 
-                                                : "bg-gray-900 text-white"
+                                                : "bg-[#0f172a] text-white"
                                         )}>
                                             {getInitials(displayName)}
                                         </div>
                                         <div 
                                             className={cn(
                                                 "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2",
-                                                activeUser === user ? "border-gray-900" : "border-white",
+                                                activeUser === user ? "border-[#0f172a]" : "border-white",
                                                 status === 'connected' && "bg-green-500",
                                                 status === 'connecting' && "bg-amber-500",
-                                                status === 'disconnected' && "bg-gray-400"
+                                                status === 'disconnected' && "bg-slate-400"
                                             )}
                                         />
                                     </div>
@@ -1370,7 +1426,7 @@ function ChatApp() {
                                         </span>
                                         <span className={cn(
                                             "text-xs",
-                                            activeUser === user ? "text-white/70" : "text-gray-500"
+                                            activeUser === user ? "text-white/70" : "text-slate-500"
                                         )}>
                                             {currentStatus.text}
                                         </span>
@@ -1422,7 +1478,7 @@ function ChatApp() {
                                         <Button 
                                             variant="ghost" 
                                             size="icon" 
-                                            className="h-5 w-5 p-0 hover:bg-gray-100"
+                                            className="h-5 w-5 p-0 hover:bg-slate-100"
                                             onClick={() => setIsEditingNickname(true)}
                                         >
                                             <Edit2 className="w-3 h-3" />
@@ -1433,7 +1489,7 @@ function ChatApp() {
                                         onClick={() => setIsEditingNickname(true)} 
                                         size="icon"
                                         variant="ghost"
-                                        className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground hover:bg-gray-100"
+                                        className="h-5 w-5 p-0 text-muted-foreground hover:text-foreground hover:bg-slate-100"
                                         title="设置昵称"
                                     >
                                         <Edit2 className="w-3 h-3" />
@@ -1464,7 +1520,7 @@ function ChatApp() {
                     </div>
 
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-gray-50" ref={chatBoxRef}>
+                    <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 bg-slate-50" ref={chatBoxRef}>
                         {filteredChatHistory.map((c, i) => {
                             // 计算是否是第一条未读消息
                             const chatKey = activeUser === null ? '__global__' : activeUser;
