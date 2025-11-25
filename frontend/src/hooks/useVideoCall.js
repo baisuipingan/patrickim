@@ -442,17 +442,27 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             // 替换视频轨道并重新协商
             const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
-                const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
+                const pc = peer.pc;
+                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(screenStream.getVideoTracks()[0]);
                     log('🔄 已替换视频轨道为屏幕共享');
                     
+                    // 等待一帧确保轨道替换生效
+                    await new Promise(r => setTimeout(r, 100));
+                    
                     // 重新协商 SDP（屏幕分辨率可能与摄像头不同）
                     try {
-                        const offer = await peer.pc.createOffer();
-                        await peer.pc.setLocalDescription(offer);
+                        // 确保信令状态稳定
+                        if (pc.signalingState !== 'stable') {
+                            log(`⚠️ 等待信令状态稳定: ${pc.signalingState}`);
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                        
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
                         sendSignal('video-offer', currentRemoteUser, {
-                            sdp: peer.pc.localDescription
+                            sdp: pc.localDescription
                         });
                         log('🔄 已发送屏幕共享重新协商');
                     } catch (err) {
@@ -501,16 +511,24 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         if (originalVideoTrackRef.current && currentRemoteUser) {
             const peer = peersRef.current[currentRemoteUser];
             if (peer && peer.pc) {
-                const sender = peer.pc.getSenders().find(s => s.track?.kind === 'video');
+                const pc = peer.pc;
+                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
                     await sender.replaceTrack(originalVideoTrackRef.current);
                     
+                    // 等待一帧确保轨道替换生效
+                    await new Promise(r => setTimeout(r, 100));
+                    
                     // 重新协商 SDP（切回摄像头分辨率）
                     try {
-                        const offer = await peer.pc.createOffer();
-                        await peer.pc.setLocalDescription(offer);
+                        if (pc.signalingState !== 'stable') {
+                            await new Promise(r => setTimeout(r, 500));
+                        }
+                        
+                        const offer = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
                         sendSignal('video-offer', currentRemoteUser, {
-                            sdp: peer.pc.localDescription
+                            sdp: pc.localDescription
                         });
                     } catch (err) {
                         log(`⚠️ 停止共享重新协商失败: ${err.message}`);
@@ -544,15 +562,34 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             return;
         }
         
+        const pc = peer.pc;
+        
         try {
-            log(`📥 收到视频 offer，正在处理...`);
-            await peer.pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-            const answer = await peer.pc.createAnswer();
-            await peer.pc.setLocalDescription(answer);
+            log(`📥 收到视频 offer，signalingState=${pc.signalingState}`);
+            
+            // 如果当前不是 stable 状态，可能存在竞争，需要回滚
+            if (pc.signalingState !== 'stable') {
+                log(`⚠️ 信令状态非 stable，等待稳定后处理...`);
+                // 等待状态稳定
+                await new Promise(resolve => {
+                    const checkState = () => {
+                        if (pc.signalingState === 'stable') {
+                            resolve();
+                        } else {
+                            setTimeout(checkState, 100);
+                        }
+                    };
+                    setTimeout(checkState, 100);
+                });
+            }
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
             
             // 发送 answer
             sendSignal('video-answer', fromUserId, {
-                sdp: peer.pc.localDescription
+                sdp: pc.localDescription
             });
             log(`📤 已发送视频 answer`);
         } catch (error) {

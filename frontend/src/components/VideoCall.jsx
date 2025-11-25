@@ -324,7 +324,7 @@ export function VideoCallWindow({
             
             {/* 视频区域 */}
             <div className={cn(
-                "relative bg-black flex items-center justify-center",
+                "relative bg-black",
                 isFullscreen ? "flex-1" : "aspect-video"
             )}>
                 {/* 远端视频（主画面） */}
@@ -332,10 +332,7 @@ export function VideoCallWindow({
                     ref={setRemoteVideoRef}
                     autoPlay
                     playsInline
-                    className={cn(
-                        "object-contain",
-                        isFullscreen ? "max-w-full max-h-full" : "w-full h-full"
-                    )}
+                    className="absolute inset-0 w-full h-full object-contain"
                 />
                 {!remoteVideoEnabled && (
                     <div className="absolute inset-0 bg-gray-800 flex flex-col items-center justify-center">
