@@ -148,13 +148,16 @@ export default function ChatMessage({ message, displayName, isMine, onImageClick
                     </span>
                 )}
                 
-                <div className="relative">
+                <div className="relative max-w-full">
                     <div className={cn(
-                        "px-4 py-2.5 text-[15px] leading-relaxed inline-block break-words",
+                        "px-4 py-2.5 text-[15px] leading-relaxed break-words whitespace-pre-wrap",
+                        "max-w-full overflow-hidden",
                         isMine 
                             ? "bg-blue-600 text-white rounded-2xl rounded-br-md" 
                             : "bg-white text-gray-900 rounded-2xl rounded-bl-md border shadow-sm"
-                    )}>
+                    )}
+                    style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}
+                    >
                         {renderContent()}
                     </div>
                     <Button

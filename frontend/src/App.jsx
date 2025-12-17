@@ -737,7 +737,11 @@ function ChatApp() {
         let dc;
 
         if (initiator) {
-            dc = pc.createDataChannel("chat");
+            // 配置 DataChannel 以优化大文件传输
+            dc = pc.createDataChannel("chat", {
+                ordered: true,  // 保证顺序，文件传输需要
+                maxRetransmits: undefined  // 可靠传输
+            });
             setupDataChannel(dc, remoteId);
         } else {
             pc.ondatachannel = (e) => {

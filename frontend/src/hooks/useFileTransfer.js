@@ -82,7 +82,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
      */
     const sendFileActual = useCallback(async (file, targetUser) => {
         const fileId = Math.random().toString(36).substr(2, 9);
-        const chunkSize = 32 * 1024; // 32KB
+        const chunkSize = 64 * 1024; // 64KB - WebRTC 推荐的最大值
         const totalChunks = Math.ceil(file.size / chunkSize);
         
         // 检查文件是否有效
@@ -423,15 +423,17 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     return; // 暂停中，等待恢复
                 }
                 
-                // 动态调整阈值
-                if (totalChunksCount - chunkCount > 16) {
-                    dc.bufferedAmountLowThreshold = 16 * chunkSize; // 512KB
+                // 动态调整阈值 - 保持 4MB 缓冲区
+                const bufferThreshold = 4 * 1024 * 1024; // 4MB
+                if (totalChunksCount - chunkCount > 64) {
+                    dc.bufferedAmountLowThreshold = bufferThreshold;
                 } else {
                     dc.bufferedAmountLowThreshold = 0;
                 }
                 
-                // 批量发送 32 个 chunk
-                for (let i = 0; i < 32 && chunkCount < totalChunksCount; i++) {
+                // 批量发送直到缓冲区满（最多 8MB）
+                const maxBufferedAmount = 8 * 1024 * 1024; // 8MB
+                while (chunkCount < totalChunksCount && dc.bufferedAmount < maxBufferedAmount) {
                     const start = chunkCount * chunkSize;
                     const end = Math.min(start + chunkSize, arrayBuffer.byteLength);
                     const chunk = arrayBuffer.slice(start, end);
