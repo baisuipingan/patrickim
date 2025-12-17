@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback } from 'react';
-import CryptoJS from 'crypto-js';
 import { formatSize, formatSpeed, formatTime } from '../utils/formatters';
 import { isImageFile, isModernFileAPISupported } from '../utils/fileUtils';
 
@@ -117,24 +116,6 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             });
             throw new Error(`Failed to read file: ${error.message}`);
         }
-        
-        // 更新状态为"计算哈希中"
-        setFileProgress(prev => ({
-            ...prev,
-            [`up-${fileId}-preparing`]: {
-                type: 'upload',
-                name: file.name,
-                totalSize: formatSize(file.size),
-                sent: '准备中...',
-                percent: 0,
-                speed: '',
-                remaining: '正在计算文件哈希...'
-            }
-        }));
-        
-        // 计算 MD5
-        const wordArray = CryptoJS.lib.WordArray.create(arrayBuffer);
-        const md5Hash = CryptoJS.MD5(wordArray).toString(CryptoJS.enc.Base64);
         
         // 清理准备中的进度条
         setFileProgress(prev => {
@@ -306,7 +287,6 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 chunkSize,
                 target.name,
                 file.type,
-                md5Hash,
                 isPrivate
             );
         });
@@ -358,7 +338,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
     /**
      * 向单个 Channel 发送文件
      */
-    const sendFileToChannel = useCallback((dc, arrayBuffer, fileId, targetId, fileName, totalChunks, chunkSize, targetName, fileType, md5Hash, isPrivate) => {
+    const sendFileToChannel = useCallback((dc, arrayBuffer, fileId, targetId, fileName, totalChunks, chunkSize, targetName, fileType, isPrivate) => {
         return new Promise((resolve, reject) => {
             let offset = 0;
             const startTime = Date.now();
@@ -483,11 +463,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     // 该目标传输完成
                     dc.onbufferedamountlow = null;
                     
-                    // 发送完成消息和 hash
+                    // 发送完成消息
                     dc.send(JSON.stringify({
                         type: 'file-done',
-                        fileId,
-                        hash: md5Hash
+                        fileId
                     }));
                     
                     // 删除该目标的进度条
@@ -533,12 +512,11 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         
         const isImage = isImageFile(fileMeta.name, fileMeta.fileType);
         
-        // 统一使用 chunks 数组方式（禁用现代 API）
+        // 统一使用 chunks 数组方式
         incomingFilesRef.current[remoteId][fileMeta.fileId] = {
             meta: fileMeta,
             received: 0,
             chunks: [],  // 总是使用数组存储
-            hasher: CryptoJS.algo.MD5.create(),
             startTime: Date.now(),
             lastUpdateTime: Date.now(),
             fileHandle: null,

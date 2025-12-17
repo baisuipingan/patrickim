@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, Component } from 'react';
-import CryptoJS from 'crypto-js';
 import { formatSize, formatTime, formatSpeed } from './utils/formatters';
 import { isModernFileAPISupported } from './utils/fileUtils';
 import { ICE_SERVERS } from './constants/config';
@@ -647,49 +646,40 @@ function ChatApp() {
                  }
                 break;
             case 'file-done':
-                // 文件传输完成，验证 hash
+                // 文件传输完成
                 const transfer = incomingFilesRef.current[from]?.[payload.fileId];
                 if (transfer) {
-                    const calculatedHash = transfer.hasher.finalize().toString(CryptoJS.enc.Base64);
-                    if (calculatedHash === payload.hash) {
-                        log(`✅ File verified: ${transfer.meta.name}`);
-                        
-                        let fileUrl = null;
-                        const isImage = transfer.meta.fileType?.startsWith('image/') || 
-                                       /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(transfer.meta.name);
-                        
-                        // 关闭 writer（如果有）
-                        if (transfer.writer) {
-                            await transfer.writer.close();
-                        }
-                        
-                        // 创建 Blob URL（统一使用下载方式）
-                        if (transfer.chunks && transfer.chunks.length > 0) {
-                            const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
-                            fileUrl = URL.createObjectURL(blob);
-                            blobUrlsRef.current.add(fileUrl);
-                        } else {
-                            log(`⚠️ Warning: No chunks data for ${transfer.meta.name}`);
-                        }
-                        
-                        // 添加到聊天记录（只有有 fileUrl 才添加）
-                        if (fileUrl) {
-                            const fileMsg = {
-                                type: 'file',
-                                name: transfer.meta.name,
-                                data: fileUrl,
-                                mode: transfer.meta.mode || 'broadcast',
-                                savedToDisk: false  // 统一使用下载按钮方式
-                            };
-                            addChat({ from, ...fileMsg });
-                        }
-                        
-                        delete incomingFilesRef.current[from][payload.fileId];
-                        delete transferControlRef.current[`down-${payload.fileId}`];
-                    } else {
-                        log(`❌ Hash mismatch: ${transfer.meta.name}`);
-                        alert(`File corrupted: ${transfer.meta.name}`);
+                    log(`✅ File received: ${transfer.meta.name}`);
+                    
+                    // 关闭 writer（如果有）
+                    if (transfer.writer) {
+                        await transfer.writer.close();
                     }
+                    
+                    // 创建 Blob URL
+                    let fileUrl = null;
+                    if (transfer.chunks && transfer.chunks.length > 0) {
+                        const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
+                        fileUrl = URL.createObjectURL(blob);
+                        blobUrlsRef.current.add(fileUrl);
+                    } else {
+                        log(`⚠️ Warning: No chunks data for ${transfer.meta.name}`);
+                    }
+                    
+                    // 添加到聊天记录
+                    if (fileUrl) {
+                        const fileMsg = {
+                            type: 'file',
+                            name: transfer.meta.name,
+                            data: fileUrl,
+                            mode: transfer.meta.mode || 'broadcast',
+                            savedToDisk: false
+                        };
+                        addChat({ from, ...fileMsg });
+                    }
+                    
+                    delete incomingFilesRef.current[from][payload.fileId];
+                    delete transferControlRef.current[`down-${payload.fileId}`];
                 }
                 break;
             case 'file-start':
@@ -1033,49 +1023,40 @@ function ChatApp() {
                     }
                 }
             } else if (msg.type === 'file-done') {
-                // 文件传输完成，验证 hash
+                // 文件传输完成
                 const transfer = incomingFilesRef.current[remoteId]?.[msg.fileId];
                 if (transfer) {
-                    const calculatedHash = transfer.hasher.finalize().toString(CryptoJS.enc.Base64);
-                    if (calculatedHash === msg.hash) {
-                        log(`✅ File verified: ${transfer.meta.name}`);
-                        
-                        let fileUrl = null;
-                        const isImage = transfer.meta.fileType?.startsWith('image/') || 
-                                       /\.(jpg|jpeg|png|gif|webp|svg|bmp)$/i.test(transfer.meta.name);
-                        
-                        // 关闭 writer（如果有）
-                        if (transfer.writer) {
-                            await transfer.writer.close();
-                        }
-                        
-                        // 创建 Blob URL（统一使用下载方式）
-                        if (transfer.chunks && transfer.chunks.length > 0) {
-                            const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
-                            fileUrl = URL.createObjectURL(blob);
-                            blobUrlsRef.current.add(fileUrl);
-                        } else {
-                            log(`⚠️ Warning: No chunks data for ${transfer.meta.name}`);
-                        }
-                        
-                        // 添加到聊天记录（只有有 fileUrl 才添加）
-                        if (fileUrl) {
-                            const fileMsg = {
-                                type: 'file',
-                                name: transfer.meta.name,
-                                data: fileUrl,
-                                mode: transfer.meta.mode || 'broadcast',
-                                savedToDisk: false  // 统一使用下载按钮方式
-                            };
-                            addChat({ from: remoteId, ...fileMsg });
-                        }
-                        
-                        delete incomingFilesRef.current[remoteId][msg.fileId];
-                        delete transferControlRef.current[`down-${msg.fileId}`];
-                    } else {
-                        log(`❌ Hash mismatch: ${transfer.meta.name}`);
-                        alert(`File corrupted: ${transfer.meta.name}`);
+                    log(`✅ File received: ${transfer.meta.name}`);
+                    
+                    // 关闭 writer（如果有）
+                    if (transfer.writer) {
+                        await transfer.writer.close();
                     }
+                    
+                    // 创建 Blob URL
+                    let fileUrl = null;
+                    if (transfer.chunks && transfer.chunks.length > 0) {
+                        const blob = new Blob(transfer.chunks, { type: transfer.meta.fileType });
+                        fileUrl = URL.createObjectURL(blob);
+                        blobUrlsRef.current.add(fileUrl);
+                    } else {
+                        log(`⚠️ Warning: No chunks data for ${transfer.meta.name}`);
+                    }
+                    
+                    // 添加到聊天记录
+                    if (fileUrl) {
+                        const fileMsg = {
+                            type: 'file',
+                            name: transfer.meta.name,
+                            data: fileUrl,
+                            mode: transfer.meta.mode || 'broadcast',
+                            savedToDisk: false
+                        };
+                        addChat({ from: remoteId, ...fileMsg });
+                    }
+                    
+                    delete incomingFilesRef.current[remoteId][msg.fileId];
+                    delete transferControlRef.current[`down-${msg.fileId}`];
                 }
             } else if (msg.type === 'file-start') {
                 await initFileReceive(remoteId, msg);
@@ -1114,9 +1095,6 @@ function ChatApp() {
             const isPaused = transferControlRef.current[`down-${fileId}`]?.paused;
             
             if (transfer.received < transfer.meta.size) {
-                // 更新 hash
-                transfer.hasher.update(CryptoJS.lib.WordArray.create(chunk));
-                
                 // 写入文件
                 if (transfer.writer) {
                     // 现代 API: 流式写入
