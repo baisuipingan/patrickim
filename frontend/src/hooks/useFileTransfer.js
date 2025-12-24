@@ -28,8 +28,8 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
      * 发送文件
      */
     const sendFile = useCallback(async (file) => {
-        if (file.size > 2 * 1024 * 1024 * 1024) {
-            alert(`文件 "${file.name}" 过大（最大支持 2GB）\n当前文件大小：${formatSize(file.size)}`);
+        if (file.size > 50 * 1024 * 1024 * 1024) {
+            alert(`文件 "${file.name}" 过大（最大支持 50GB）\n当前文件大小：${formatSize(file.size)}`);
             return;
         }
         
