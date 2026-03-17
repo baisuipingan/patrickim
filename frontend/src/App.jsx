@@ -1538,6 +1538,19 @@ function ChatApp() {
             case 'file-start':
                 await initFileReceive(from, payload);
                 break;
+            case CALL_MESSAGE_TYPES.CALL_REQUEST:
+            case CALL_MESSAGE_TYPES.CALL_ACCEPT:
+            case CALL_MESSAGE_TYPES.CALL_REJECT:
+            case CALL_MESSAGE_TYPES.CALL_END:
+            case CALL_MESSAGE_TYPES.CALL_BUSY:
+            case CALL_MESSAGE_TYPES.TOGGLE_VIDEO:
+            case CALL_MESSAGE_TYPES.TOGGLE_AUDIO:
+            case CALL_MESSAGE_TYPES.SCREEN_SHARE_START:
+            case CALL_MESSAGE_TYPES.SCREEN_SHARE_STOP:
+            case 'video-offer':
+            case 'video-answer':
+                handleCallSignal(type, from, payload || {});
+                break;
         }
     };
 
@@ -2055,7 +2068,7 @@ function ChatApp() {
                 await initFileReceive(remoteId, msg);
             } else if (Object.values(CALL_MESSAGE_TYPES).includes(msg.type) || 
                        msg.type === 'video-offer' || msg.type === 'video-answer') {
-                // 处理通话相关信令（包括视频重新协商）
+                // 兼容旧标签页：如果仍有通话控制从 DataChannel 过来，继续接收。
                 handleCallSignal(msg.type, remoteId, msg);
             } else {
                 // Normal chat or other signaling
@@ -2164,27 +2177,6 @@ function ChatApp() {
         return false;
     };
     
-    // 发送 DataChannel 消息（用于通话信令等）
-    // 参数格式与 WebSocket sendSignal 保持一致: (type, targetUserId, payload)
-    const sendDataChannelMessage = (type, targetUserId, payload) => {
-        const peer = peersRef.current[targetUserId];
-        if (peer && peer.dc && peer.dc.readyState === 'open') {
-            peer.dc.send(JSON.stringify({ type, ...payload }));
-            return true;
-        }
-        diagnostics.reportIssue('datachannel_send_unavailable', {
-            type,
-            targetUserId,
-            readyState: peer?.dc?.readyState || 'missing'
-        }, {
-            delayMs: 1000,
-            context: {
-                feature: 'datachannel'
-            }
-        });
-        return false;
-    };
-    
     // 音视频通话 Hook
     const {
         callStatus,
@@ -2208,7 +2200,7 @@ function ChatApp() {
         cleanupCall
     } = useVideoCall({
         peersRef,
-        sendSignal: sendDataChannelMessage, // 通话信令通过 DataChannel 发送
+        sendSignal, // 通话控制与视频重协商统一走 WebSocket
         log,
         myId: myIdRef.current,
         getDisplayName,
