@@ -11,6 +11,8 @@ const {
     PROGRESS_UPDATE_INTERVAL
 } = FILE_TRANSFER_CONFIG;
 
+const OFFER_RESPONSE_TIMEOUT_MS = 60_000;
+
 /**
  * useFileTransfer Hook
  * 管理文件传输的发送和接收逻辑
@@ -26,11 +28,12 @@ const {
  * @param {Object} params.diagnostics - 诊断上报对象
  * @returns {Object} 文件传输相关的状态和方法
  */
-export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, blobUrlsRef, activeUser, diagnostics }) {
+export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myId, getDisplayName, blobUrlsRef, activeUser, diagnostics }) {
     const [fileProgress, setFileProgress] = useState({});
     
     const transferControlRef = useRef({});
     const incomingFilesRef = useRef({});
+    const incomingFileOffersRef = useRef({});
     const fileQueueRef = useRef([]);
     const isSendingFileRef = useRef(false);
 
@@ -71,6 +74,105 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             return false;
         }
     }, []);
+
+    const updateFileOfferMessage = useCallback((fromUserId, fileId, patch) => {
+        patchChatMessages?.(
+            (message) => (
+                message.type === 'file-offer' &&
+                message.fileId === fileId &&
+                message.from === fromUserId
+            ),
+            patch
+        );
+    }, [patchChatMessages]);
+
+    const removeTransferProgress = useCallback((key) => {
+        setFileProgress(prev => {
+            if (!prev[key]) {
+                return prev;
+            }
+            const next = { ...prev };
+            delete next[key];
+            return next;
+        });
+    }, []);
+
+    const setUploadAwaitingProgress = useCallback((fileId, file, targetId, targetName) => {
+        setFileProgress(prev => ({
+            ...prev,
+            [`up-${fileId}-${targetId}`]: {
+                controlKey: `up-${fileId}`,
+                type: 'upload',
+                name: file.name,
+                totalSize: formatSize(file.size),
+                sent: '等待接收方确认',
+                percent: 0,
+                speed: '',
+                remaining: '',
+                targetId,
+                targetName,
+                canPause: false,
+                phase: 'awaiting-acceptance',
+                statusText: '等待对方点击接收'
+            }
+        }));
+    }, []);
+
+    const resolveOfferDecision = useCallback((fileId, targetId, decision) => {
+        const control = transferControlRef.current[`up-${fileId}`];
+        if (!control) {
+            return;
+        }
+
+        const timer = control.subOfferTimers[targetId];
+        if (timer) {
+            clearTimeout(timer);
+            delete control.subOfferTimers[targetId];
+        }
+
+        control.subOfferStatus[targetId] = decision;
+        const resolver = control.subOfferResolvers[targetId];
+        if (resolver) {
+            delete control.subOfferResolvers[targetId];
+            resolver(decision);
+        }
+    }, []);
+
+    const waitForOfferDecision = useCallback((fileId, targetId) => (
+        new Promise((resolve) => {
+            const control = transferControlRef.current[`up-${fileId}`];
+            if (!control) {
+                resolve('cancelled');
+                return;
+            }
+
+            const existingDecision = control.subOfferStatus[targetId];
+            if (existingDecision && existingDecision !== 'pending') {
+                resolve(existingDecision);
+                return;
+            }
+
+            control.subOfferResolvers[targetId] = resolve;
+            control.subOfferTimers[targetId] = setTimeout(() => {
+                const latestControl = transferControlRef.current[`up-${fileId}`];
+                if (!latestControl) {
+                    resolve('cancelled');
+                    return;
+                }
+
+                const latestDecision = latestControl.subOfferStatus[targetId];
+                if (latestDecision && latestDecision !== 'pending') {
+                    resolve(latestDecision);
+                    return;
+                }
+
+                delete latestControl.subOfferResolvers[targetId];
+                delete latestControl.subOfferTimers[targetId];
+                latestControl.subOfferStatus[targetId] = 'timeout';
+                resolve('timeout');
+            }, OFFER_RESPONSE_TIMEOUT_MS);
+        })
+    ), []);
     
     /**
      * 发送文件
@@ -260,6 +362,9 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             subCancelled: {},
             subChannels: {},
             subDataChannels: {},
+            subOfferStatus: {},
+            subOfferResolvers: {},
+            subOfferTimers: {},
             subSendBatch: {},
             pause: () => {
                 const ctrl = transferControlRef.current[`up-${fileId}`];
@@ -272,6 +377,9 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 
                 // 通知所有接收端暂停
                 Object.entries(ctrl.subChannels).forEach(([id, channel]) => {
+                    if (ctrl.subOfferStatus[id] !== 'accepted') {
+                        return;
+                    }
                     try {
                         sendJsonMessage(channel, {
                             type: 'pause-transfer-by-sender',
@@ -293,6 +401,9 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 
                 // 通知所有接收端恢复
                 Object.entries(ctrl.subChannels).forEach(([id, channel]) => {
+                    if (ctrl.subOfferStatus[id] !== 'accepted') {
+                        return;
+                    }
                     try {
                         sendJsonMessage(channel, {
                             type: 'resume-transfer-by-sender',
@@ -335,13 +446,19 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                         dataChannel.onbufferedamountlow = null;
                     }
                     try {
-                        sendJsonMessage(channel, {
-                            type: 'cancel-transfer',
-                            fileId: fileId
-                        });
+                        sendJsonMessage(channel, ctrl.subOfferStatus[id] === 'accepted'
+                            ? {
+                                type: 'cancel-transfer',
+                                fileId: fileId
+                            }
+                            : {
+                                type: 'file-offer-cancel',
+                                fileId: fileId
+                            });
                     } catch (e) {
                         console.error('Failed to send cancel signal:', e);
                     }
+                    resolveOfferDecision(fileId, id, 'cancelled');
                 });
                 
                 setFileProgress(prev => {
@@ -371,23 +488,86 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             control.subCancelled[target.id] = false;
             control.subChannels[target.id] = target.controlDc;
             control.subDataChannels[target.id] = target.dataDc;
-            
-            return sendFileToChannel(
-                target.dataDc,
-                target.controlDc,
-                arrayBuffer,
+            control.subOfferStatus[target.id] = 'pending';
+            setUploadAwaitingProgress(fileId, file, target.id, target.name);
+
+            const offerSent = sendJsonMessage(target.controlDc, {
+                type: 'file-offer',
                 fileId,
-                target.id,
-                file.name,
-                totalChunks,
-                chunkSize,
-                target.name,
-                file.type,
-                isPrivate
-            );
+                name: file.name,
+                size: file.size,
+                fileType: file.type,
+                mode: isPrivate ? 'private' : 'broadcast'
+            });
+
+            if (!offerSent) {
+                resolveOfferDecision(fileId, target.id, 'cancelled');
+                removeTransferProgress(`up-${fileId}-${target.id}`);
+                reportFileIssue('file_offer_send_failed', {
+                    fileId,
+                    fileName: file.name,
+                    targetId: target.id,
+                    targetName: target.name
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'file-offer'
+                    }
+                });
+                return Promise.resolve({ status: 'failed', targetId: target.id });
+            }
+
+            recordFileEvent('file_offer_sent', {
+                fileId,
+                fileName: file.name,
+                targetId: target.id,
+                targetName: target.name
+            });
+
+            return waitForOfferDecision(fileId, target.id).then((decision) => {
+                if (decision !== 'accepted') {
+                    removeTransferProgress(`up-${fileId}-${target.id}`);
+                    if (decision === 'rejected') {
+                        log(`${target.name} 拒绝接收 ${file.name}`);
+                        recordFileEvent('file_offer_rejected', {
+                            fileId,
+                            fileName: file.name,
+                            targetId: target.id,
+                            targetName: target.name
+                        });
+                    } else if (decision === 'timeout') {
+                        log(`${target.name} 长时间未确认接收 ${file.name}`);
+                        recordFileEvent('file_offer_timed_out', {
+                            fileId,
+                            fileName: file.name,
+                            targetId: target.id,
+                            targetName: target.name,
+                            timeoutMs: OFFER_RESPONSE_TIMEOUT_MS
+                        });
+                    }
+                    return { status: decision, targetId: target.id };
+                }
+
+                return sendFileToChannel(
+                    target.dataDc,
+                    target.controlDc,
+                    arrayBuffer,
+                    fileId,
+                    target.id,
+                    file.name,
+                    totalChunks,
+                    chunkSize,
+                    target.name,
+                    file.type,
+                    isPrivate
+                ).then(() => ({
+                    status: 'sent',
+                    targetId: target.id
+                }));
+            });
         });
         
-        await Promise.all(promises);
+        const results = await Promise.all(promises);
         
         // 检查是否在传输过程中被取消
         const ctrl = transferControlRef.current[`up-${fileId}`];
@@ -411,6 +591,18 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             return;
         }
         
+        const sentTargets = results.filter(result => result?.status === 'sent');
+        if (sentTargets.length === 0) {
+            delete transferControlRef.current[`up-${fileId}`];
+            log(`文件未开始传输: ${file.name}`);
+            recordFileEvent('file_send_skipped_without_acceptance', {
+                fileId,
+                fileName: file.name,
+                targetCount: targets.length
+            });
+            return;
+        }
+
         // 清理控制对象
         delete transferControlRef.current[`up-${fileId}`];
         
@@ -437,9 +629,9 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             fileId,
             fileName: file.name,
             size: file.size,
-            targetCount: targets.length
+            targetCount: sentTargets.length
         });
-    }, [addChat, blobUrlsRef, getDisplayName, getPeerTransferChannels, log, peersRef, recordFileEvent, reportFileIssue, sendJsonMessage, setFileProgress]);
+    }, [addChat, blobUrlsRef, getDisplayName, getPeerTransferChannels, log, peersRef, recordFileEvent, removeTransferProgress, reportFileIssue, resolveOfferDecision, sendJsonMessage, setUploadAwaitingProgress, waitForOfferDecision]);
     
     /**
      * 向单个 Channel 发送文件
@@ -553,7 +745,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     speed: '0 B/s',
                     remaining: 'calculating...',
                     targetId,
-                    targetName: targetName
+                    targetName: targetName,
+                    canPause: true,
+                    phase: 'transferring',
+                    statusText: ''
                 }
             }));
             
@@ -722,10 +917,229 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         });
     }, [log, recordFileEvent, reportFileIssue, sendJsonMessage, setFileProgress]);
     
+    const handleIncomingFileOffer = useCallback((remoteId, fileMeta) => {
+        if (!remoteId || !fileMeta?.fileId || !fileMeta?.name) {
+            return;
+        }
+
+        const offerKey = `${remoteId}:${fileMeta.fileId}`;
+        const existingOffer = incomingFileOffersRef.current[offerKey];
+        if (existingOffer?.status === 'pending' || existingOffer?.status === 'accepted') {
+            return;
+        }
+
+        incomingFileOffersRef.current[offerKey] = {
+            remoteId,
+            fileId: fileMeta.fileId,
+            name: fileMeta.name,
+            size: fileMeta.size,
+            fileType: fileMeta.fileType,
+            mode: fileMeta.mode || 'broadcast',
+            status: 'pending'
+        };
+
+        addChat({
+            from: remoteId,
+            to: myId,
+            type: 'file-offer',
+            fileId: fileMeta.fileId,
+            name: fileMeta.name,
+            size: fileMeta.size,
+            fileType: fileMeta.fileType,
+            mode: fileMeta.mode || 'broadcast',
+            offerStatus: 'pending'
+        });
+
+        recordFileEvent('file_offer_received', {
+            fileId: fileMeta.fileId,
+            fileName: fileMeta.name,
+            fromUserId: remoteId,
+            size: fileMeta.size
+        });
+    }, [addChat, myId, recordFileEvent]);
+
+    const handleFileOfferResponse = useCallback((remoteId, message) => {
+        const fileId = message?.fileId;
+        if (!remoteId || !fileId || !message?.type) {
+            return;
+        }
+
+        if (message.type === 'file-accept' || message.type === 'file-reject') {
+            const decision = message.type === 'file-accept' ? 'accepted' : 'rejected';
+            resolveOfferDecision(fileId, remoteId, decision);
+
+            if (decision === 'accepted') {
+                recordFileEvent('file_offer_accepted', {
+                    fileId,
+                    targetId: remoteId
+                });
+            } else {
+                recordFileEvent('file_offer_rejected', {
+                    fileId,
+                    targetId: remoteId
+                });
+            }
+            return;
+        }
+
+        if (message.type === 'file-offer-cancel') {
+            const offerKey = `${remoteId}:${fileId}`;
+            const offer = incomingFileOffersRef.current[offerKey];
+            if (!offer) {
+                return;
+            }
+
+            offer.status = 'cancelled';
+            updateFileOfferMessage(remoteId, fileId, {
+                offerStatus: 'cancelled'
+            });
+            delete incomingFileOffersRef.current[offerKey];
+        }
+    }, [recordFileEvent, resolveOfferDecision, updateFileOfferMessage]);
+
+    const acceptIncomingFileOffer = useCallback((fileId, fromUserId) => {
+        const offerKey = `${fromUserId}:${fileId}`;
+        const offer = incomingFileOffersRef.current[offerKey];
+        if (!offer) {
+            return false;
+        }
+
+        const peer = peersRef.current[fromUserId];
+        const { controlDc } = getPeerTransferChannels(peer);
+        const sent = sendJsonMessage(controlDc, {
+            type: 'file-accept',
+            fileId,
+            receiverId: myId
+        });
+
+        if (!sent) {
+            reportFileIssue('file_accept_send_failed', {
+                fileId,
+                fromUserId
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'file-offer'
+                }
+            });
+            return false;
+        }
+
+        offer.status = 'accepted';
+        updateFileOfferMessage(fromUserId, fileId, {
+            offerStatus: 'accepted'
+        });
+        recordFileEvent('file_offer_accepted_locally', {
+            fileId,
+            fromUserId
+        });
+        return true;
+    }, [getPeerTransferChannels, myId, peersRef, recordFileEvent, reportFileIssue, sendJsonMessage, updateFileOfferMessage]);
+
+    const rejectIncomingFileOffer = useCallback((fileId, fromUserId) => {
+        const offerKey = `${fromUserId}:${fileId}`;
+        const offer = incomingFileOffersRef.current[offerKey];
+        if (!offer) {
+            return false;
+        }
+
+        const peer = peersRef.current[fromUserId];
+        const { controlDc } = getPeerTransferChannels(peer);
+        const sent = sendJsonMessage(controlDc, {
+            type: 'file-reject',
+            fileId,
+            receiverId: myId
+        });
+
+        if (!sent) {
+            reportFileIssue('file_reject_send_failed', {
+                fileId,
+                fromUserId
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'file-offer'
+                }
+            });
+            return false;
+        }
+
+        offer.status = 'rejected';
+        updateFileOfferMessage(fromUserId, fileId, {
+            offerStatus: 'rejected'
+        });
+        delete incomingFileOffersRef.current[offerKey];
+        recordFileEvent('file_offer_rejected_locally', {
+            fileId,
+            fromUserId
+        });
+        return true;
+    }, [getPeerTransferChannels, myId, peersRef, recordFileEvent, reportFileIssue, sendJsonMessage, updateFileOfferMessage]);
+
+    const markIncomingFileOfferReceiving = useCallback((remoteId, fileId) => {
+        if (!remoteId || !fileId) {
+            return;
+        }
+
+        const offerKey = `${remoteId}:${fileId}`;
+        if (incomingFileOffersRef.current[offerKey]) {
+            incomingFileOffersRef.current[offerKey].status = 'receiving';
+        }
+        updateFileOfferMessage(remoteId, fileId, {
+            offerStatus: 'receiving'
+        });
+    }, [updateFileOfferMessage]);
+
+    const markIncomingFileOfferCompleted = useCallback((remoteId, fileId) => {
+        if (!remoteId || !fileId) {
+            return;
+        }
+
+        const offerKey = `${remoteId}:${fileId}`;
+        if (incomingFileOffersRef.current[offerKey]) {
+            incomingFileOffersRef.current[offerKey].status = 'completed';
+            delete incomingFileOffersRef.current[offerKey];
+        }
+        updateFileOfferMessage(remoteId, fileId, {
+            offerStatus: 'completed'
+        });
+    }, [updateFileOfferMessage]);
+
+    const markIncomingFileOfferCancelled = useCallback((remoteId, fileId) => {
+        if (!remoteId || !fileId) {
+            return;
+        }
+
+        const offerKey = `${remoteId}:${fileId}`;
+        if (incomingFileOffersRef.current[offerKey]) {
+            incomingFileOffersRef.current[offerKey].status = 'cancelled';
+            delete incomingFileOffersRef.current[offerKey];
+        }
+        updateFileOfferMessage(remoteId, fileId, {
+            offerStatus: 'cancelled'
+        });
+    }, [updateFileOfferMessage]);
+
     /**
      * 初始化文件接收
      */
     const initFileReceive = useCallback(async (remoteId, fileMeta) => {
+        const offerKey = `${remoteId}:${fileMeta.fileId}`;
+        const offer = incomingFileOffersRef.current[offerKey];
+        if (offer?.status === 'rejected' || offer?.status === 'cancelled') {
+            reportFileIssue('file_receive_blocked_after_reject', {
+                fileId: fileMeta.fileId,
+                fromUserId: remoteId,
+                status: offer.status
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'file-receive'
+                }
+            });
+            return false;
+        }
+
         if (!incomingFilesRef.current[remoteId]) {
             incomingFilesRef.current[remoteId] = {};
         }
@@ -908,6 +1322,13 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         fileQueueRef,
         sendFile,
         initFileReceive,
-        processFileQueue
+        processFileQueue,
+        handleIncomingFileOffer,
+        handleFileOfferResponse,
+        acceptIncomingFileOffer,
+        rejectIncomingFileOffer,
+        markIncomingFileOfferReceiving,
+        markIncomingFileOfferCompleted,
+        markIncomingFileOfferCancelled
     };
 }

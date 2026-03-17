@@ -404,6 +404,30 @@ function ChatApp() {
             }
         }
     };
+
+    const patchChatMessages = useCallback((matcher, patch) => {
+        setChatHistory(prev => {
+            let changed = false;
+            const nextHistory = prev.map(message => {
+                if (!matcher(message)) {
+                    return message;
+                }
+                changed = true;
+                const nextPatch = typeof patch === 'function' ? patch(message) : patch;
+                return {
+                    ...message,
+                    ...nextPatch
+                };
+            });
+
+            if (!changed) {
+                return prev;
+            }
+
+            setTimeout(() => saveChatHistory(nextHistory, currentRoom), 0);
+            return nextHistory;
+        });
+    }, [currentRoom, saveChatHistory]);
     
     // 清除当前聊天窗口的历史记录
     const handleClearHistory = () => {
@@ -498,10 +522,18 @@ function ChatApp() {
         fileQueueRef,
         sendFile,
         initFileReceive,
-        processFileQueue
+        processFileQueue,
+        handleIncomingFileOffer,
+        handleFileOfferResponse,
+        acceptIncomingFileOffer,
+        rejectIncomingFileOffer,
+        markIncomingFileOfferReceiving,
+        markIncomingFileOfferCompleted,
+        markIncomingFileOfferCancelled
     } = useFileTransfer({
         log,
         addChat,
+        patchChatMessages,
         peersRef,
         myId: myIdRef.current,
         getDisplayName,
@@ -1564,7 +1596,19 @@ function ChatApp() {
                 }
                 break;
             case 'file-start':
+                markIncomingFileOfferReceiving(from, payload.fileId);
                 await initFileReceive(from, payload);
+                break;
+            case 'file-offer':
+                handleIncomingFileOffer(from, payload || {});
+                break;
+            case 'file-accept':
+            case 'file-reject':
+            case 'file-offer-cancel':
+                handleFileOfferResponse(from, {
+                    ...payload,
+                    type
+                });
                 break;
             case CALL_MESSAGE_TYPES.CALL_REQUEST:
             case CALL_MESSAGE_TYPES.CALL_ACCEPT:
@@ -2025,6 +2069,7 @@ function ChatApp() {
                     });
                     delete transferControlRef.current[`down-${msg.fileId}`];
                 }
+                markIncomingFileOfferCancelled(remoteId, msg.fileId);
             } else if (msg.type === 'pause-transfer-by-sender') {
                 // 发送端暂停，接收端显示暂停状态
                 const control = transferControlRef.current[`down-${msg.fileId}`];
@@ -2128,8 +2173,14 @@ function ChatApp() {
                     
                     delete incomingFilesRef.current[remoteId][msg.fileId];
                     delete transferControlRef.current[`down-${msg.fileId}`];
+                    markIncomingFileOfferCompleted(remoteId, msg.fileId);
                 }
+            } else if (msg.type === 'file-offer') {
+                handleIncomingFileOffer(remoteId, msg);
+            } else if (msg.type === 'file-accept' || msg.type === 'file-reject' || msg.type === 'file-offer-cancel') {
+                handleFileOfferResponse(remoteId, msg);
             } else if (msg.type === 'file-start') {
+                markIncomingFileOfferReceiving(remoteId, msg.fileId);
                 await initFileReceive(remoteId, msg);
             } else if (Object.values(CALL_MESSAGE_TYPES).includes(msg.type) || 
                        msg.type === 'video-offer' || msg.type === 'video-answer') {
@@ -2864,6 +2915,8 @@ function ChatApp() {
                                         displayName={getDisplayName(c.from)}
                                         isMine={c.from === 'Me'}
                                         onImageClick={setPreviewImage}
+                                        onAcceptFileOffer={acceptIncomingFileOffer}
+                                        onRejectFileOffer={rejectIncomingFileOffer}
                                     />
                                 </React.Fragment>
                             );
@@ -2947,12 +3000,26 @@ function ChatApp() {
                                         // 上传：只取消该目标
                                         if (control) {
                                             control.subCancelled[targetId] = true;
+                                            const offerStatus = control.subOfferStatus?.[targetId];
+                                            const offerTimer = control.subOfferTimers?.[targetId];
+                                            const resolver = control.subOfferResolvers?.[targetId];
+                                            if (offerTimer) {
+                                                clearTimeout(offerTimer);
+                                                delete control.subOfferTimers[targetId];
+                                            }
+                                            if (control.subOfferStatus) {
+                                                control.subOfferStatus[targetId] = 'cancelled';
+                                            }
+                                            if (resolver) {
+                                                delete control.subOfferResolvers[targetId];
+                                                resolver('cancelled');
+                                            }
                                             // 通知接收端
                                             const channel = control.subChannels[targetId];
                                             if (channel && channel.readyState === 'open') {
                                                 try {
                                                     channel.send(JSON.stringify({
-                                                        type: 'cancel-transfer',
+                                                        type: offerStatus === 'accepted' ? 'cancel-transfer' : 'file-offer-cancel',
                                                         fileId: controlKey.replace(/^up-/, '')
                                                     }));
                                                 } catch (e) {

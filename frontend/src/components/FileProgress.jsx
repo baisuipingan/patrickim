@@ -26,6 +26,14 @@ export default function FileProgress({
     onCancel 
 }) {
     const p = progress;
+    const showPauseButton = Boolean(control && p.canPause !== false);
+    const statusLine = p.statusText
+        || `${p.type === 'upload' ? p.sent : p.received} / ${p.totalSize} • ${isPaused ? '暂停' : p.speed}${!isPaused && p.remaining ? ` • ${p.remaining}` : ''}`;
+    const progressLabel = p.phase === 'awaiting-acceptance'
+        ? '等待'
+        : isPaused
+            ? '⏸'
+            : `${p.percent}%`;
     
     return (
         <div key={id} className="border rounded-lg p-3 mb-2 bg-white shadow-sm">
@@ -59,23 +67,22 @@ export default function FileProgress({
                                 </Badge>
                             )}
                         </div>
-                        <div className="text-[11px] text-gray-500">
-                            {p.type === 'upload' ? p.sent : p.received} / {p.totalSize} • {isPaused ? '暂停' : p.speed}
-                            {!isPaused && p.remaining && ` • ${p.remaining}`}
-                        </div>
+                        <div className="text-[11px] text-gray-500">{statusLine}</div>
                     </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                     {control && (
                         <>
-                            <Button
-                                onClick={onPauseResume}
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                            >
-                                {isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
-                            </Button>
+                            {showPauseButton && (
+                                <Button
+                                    onClick={onPauseResume}
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 w-7 p-0"
+                                >
+                                    {isPaused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
+                                </Button>
+                            )}
                             <Button
                                 onClick={onCancel}
                                 size="sm"
@@ -87,7 +94,7 @@ export default function FileProgress({
                         </>
                     )}
                     <span className="text-xs font-semibold text-gray-900 ml-1">
-                        {isPaused ? '⏸' : `${p.percent}%`}
+                        {progressLabel}
                     </span>
                 </div>
             </div>

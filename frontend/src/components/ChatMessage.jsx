@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Download, FileText, Check, Copy } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Button } from './ui/button';
+import { formatSize } from '../utils/formatters';
 
 /**
  * ChatMessage 组件
@@ -13,12 +14,65 @@ import { Button } from './ui/button';
  * @param {boolean} props.isMine - 是否是自己的消息
  * @param {Function} props.onImageClick - 图片点击回调
  */
-export default function ChatMessage({ message, displayName, isMine, onImageClick }) {
+export default function ChatMessage({ message, displayName, isMine, onImageClick, onAcceptFileOffer, onRejectFileOffer }) {
     const c = message;
     
     const renderContent = () => {
         if (c.type === 'text') {
             return <span className="break-words">{c.text}</span>;
+        }
+
+        if (c.type === 'file-offer') {
+            const offerStatusText = {
+                pending: '等待你确认',
+                accepted: '已同意，等待开始传输',
+                receiving: '接收中',
+                completed: '已完成',
+                rejected: '你已拒绝',
+                cancelled: '发送方已取消'
+            }[c.offerStatus] || '等待处理';
+
+            return (
+                <div className="space-y-3 min-w-[240px]">
+                    <div className="flex items-start gap-3">
+                        <div className={cn(
+                            "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
+                            c.offerStatus === 'pending' ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"
+                        )}>
+                            <FileText className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className="font-medium truncate">{c.name}</div>
+                            <div className="text-xs opacity-75 mt-1">
+                                {formatSize(c.size || 0)}
+                            </div>
+                            <div className="text-xs mt-2 opacity-80">
+                                {offerStatusText}
+                            </div>
+                        </div>
+                    </div>
+
+                    {!isMine && c.offerStatus === 'pending' && (
+                        <div className="flex items-center gap-2">
+                            <Button
+                                size="sm"
+                                className="h-8 px-3 bg-emerald-600 hover:bg-emerald-600/90 text-white"
+                                onClick={() => onAcceptFileOffer?.(c.fileId, c.from)}
+                            >
+                                接收
+                            </Button>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 px-3"
+                                onClick={() => onRejectFileOffer?.(c.fileId, c.from)}
+                            >
+                                拒绝
+                            </Button>
+                        </div>
+                    )}
+                </div>
+            );
         }
         
         // 文件消息
@@ -175,7 +229,7 @@ export default function ChatMessage({ message, displayName, isMine, onImageClick
                 </div>
                 
                 <span className="text-[11px] text-gray-500 px-3">
-                    {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {new Date(c.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
             </div>
         </div>
