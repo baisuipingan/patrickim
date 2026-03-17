@@ -79,6 +79,32 @@ docker compose up -d --build
 
 默认通过 Nginx 暴露在 `http://localhost`。
 
+### 方式一补充：推荐的远程发布链路
+
+如果你的服务器是 `x86_64`，而开发机像 MacBook 一样是 `arm64`，推荐改成：
+
+1. 本地用 `docker buildx` 构建 `linux/amd64` 镜像并推送到镜像仓库
+2. 服务器只执行 `docker compose pull && docker compose up -d`
+
+仓库内已经提供了两个脚本：
+
+```bash
+# 只发布镜像，不连服务器
+IMAGE_REPO=ccr.ccs.tencentyun.com/your-namespace/patrick-im \
+bash ./release-image.sh
+
+# 发布镜像后，通过 SSH 让服务器拉新镜像并重启
+SERVER=ubuntu@1.2.3.4 \
+PROJECT_DIR=/home/patrick-im \
+IMAGE_REPO=ccr.ccs.tencentyun.com/your-namespace/patrick-im \
+bash ./deploy-remote.sh
+```
+
+说明：
+- 默认构建平台是 `linux/amd64`，适合大多数云服务器。
+- 这是 Docker 层的跨架构构建，不需要额外用 `zigbuild` 去交叉编译 Rust。
+- 如果以后你既有 `amd64` 服务器也有 `arm64` 服务器，可以把 `PLATFORMS` 改成 `linux/amd64,linux/arm64` 来发多架构镜像。
+
 ### 方式二：本地源码运行
 
 适合开发和调试。
