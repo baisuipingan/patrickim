@@ -11,3 +11,4 @@ patrick-im-server.exe
 .env.local
 .env.*
 !.env.example
+!.env.local.example
