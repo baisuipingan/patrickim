@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef, Component } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Component } from 'react';
 import { formatSize, formatTime, formatSpeed } from './utils/formatters';
 import { isModernFileAPISupported } from './utils/fileUtils';
-import { ICE_SERVERS } from './constants/config';
+import { ICE_SERVERS, fetchIceConfig, fetchSession } from './constants/config';
 import { useRoom } from './hooks/useRoom';
 import { useFileTransfer } from './hooks/useFileTransfer';
 import { useChatHistory } from './hooks/useChatHistory';
+import { useDiagnostics } from './hooks/useDiagnostics';
 import { RoomSelector } from './components/RoomSelector';
 import FileProgress from './components/FileProgress';
 import MessageInput from './components/MessageInput';
@@ -45,18 +46,33 @@ class ErrorBoundary extends Component {
   }
 }
 
+const WS_STATUS = {
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+    RECONNECTING: 'reconnecting',
+    DISCONNECTED: 'disconnected'
+};
+
+const PEER_CHANNEL_STATUS = {
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+    STALE: 'stale',
+    DISCONNECTED: 'disconnected'
+};
+
+const PEER_HEARTBEAT_MESSAGE_TYPE = '__peer-heartbeat';
+const PEER_HEARTBEAT_INTERVAL_MS = 15_000;
+const PEER_STALE_THRESHOLD_MS = 60_000;
+const PEER_STALE_SWEEP_INTERVAL_MS = 5_000;
+const WS_CLOSE_REPORT_WINDOW_MS = 20_000;
+const WS_CLOSE_REPORT_THRESHOLD = 2;
+
 function ChatApp() {
     // Refs for mutable objects
-    const getStoredId = () => {
-        let id = sessionStorage.getItem("userId");
-        if (!id) {
-            id = Math.random().toString(36).substr(2, 9);
-            sessionStorage.setItem("userId", id);
-        }
-        return id;
-    };
-    const myIdRef = useRef(getStoredId());
+    const [myId, setMyId] = useState('');
+    const myIdRef = useRef('');
     const wsRef = useRef(null);
+    myIdRef.current = myId;
 
     const [logs, setLogs] = useState([]);
     const [message, setMessage] = useState("");
@@ -70,31 +86,135 @@ function ChatApp() {
     const activeUserRef = useRef(null); // Ref version of activeUser for callbacks
     const [isEditingNickname, setIsEditingNickname] = useState(false);
     const [nickname, setNickname] = useState(() => localStorage.getItem('nickname') || '');
+    const nicknameRef = useRef(localStorage.getItem('nickname') || '');
     const [userNicknames, setUserNicknames] = useState({}); // id -> nickname mapping
-    const [connectionStatus, setConnectionStatus] = useState({}); // id -> 'connecting' | 'connected' | 'disconnected'
+    const [connectionStatus, setConnectionStatus] = useState({}); // id -> P2P状态与诊断字段
+    const [wsStatus, setWsStatus] = useState(WS_STATUS.DISCONNECTED);
     const [isPrivate, setIsPrivate] = useState(false); // 是否创建私有房间
     const [unreadCounts, setUnreadCounts] = useState({}); // 未读消息计数 { userId: count }
-    const [lastReadTime, setLastReadTime] = useState(() => {
-        // 从 localStorage 加载已读时间
-        try {
-            const stored = localStorage.getItem(`lastReadTime_${myIdRef.current}`);
-            return stored ? JSON.parse(stored) : {};
-        } catch {
-            return {};
-        }
-    }); // 记录每个聊天窗口的最后已读时间 { chatKey: timestamp }
+    const [lastReadTime, setLastReadTime] = useState({}); // 记录每个聊天窗口的最后已读时间 { chatKey: timestamp }
+    const [sessionReady, setSessionReady] = useState(false);
+    const [sessionError, setSessionError] = useState('');
     const isModernAPISupported = isModernFileAPISupported();
+    const [rtcConfig, setRtcConfig] = useState(ICE_SERVERS);
+    const currentRoomRef = useRef(localStorage.getItem('lastRoom') || '');
+    const connectionStatusRef = useRef({});
+    const wsStatusRef = useRef(WS_STATUS.DISCONNECTED);
+    const rtcConfigRef = useRef(ICE_SERVERS);
+    const onlineUsersRef = useRef(new Set());
+    const sessionRefreshPromiseRef = useRef(null);
+    const wsCloseBurstRef = useRef({
+        count: 0,
+        windowStartedAt: 0
+    });
     
     const peersRef = useRef({}); // id -> {pc, dc}
+    const peerInstanceCounterRef = useRef(0);
     const eventQueueRef = useRef({}); // remoteId -> EventQueue
     const connectionTimeoutRef = useRef({}); // remoteId -> timeout handle
+    const pendingIceCandidatesRef = useRef({}); // remoteId -> RTCIceCandidateInit[]
+    const hasInitializedRoomRef = useRef(false);
+
+    const getDiagnosticsContext = useCallback(() => ({
+        clientId: myIdRef.current || '',
+        roomId: currentRoomRef.current || '',
+        activeUserId: activeUserRef.current || '',
+        nickname: nicknameRef.current || '',
+        onlineUserCount: onlineUsersRef.current.size,
+        rtcProvider: rtcConfigRef.current?.provider || 'default',
+        iceServerCount: Array.isArray(rtcConfigRef.current?.iceServers)
+            ? rtcConfigRef.current.iceServers.length
+            : 0,
+        wsStatus: wsStatusRef.current,
+        connectionStatus: connectionStatusRef.current,
+        page: window.location.pathname
+    }), []);
+
+    const diagnostics = useDiagnostics({
+        getContext: getDiagnosticsContext
+    });
+
+    const refreshAnonymousSession = useCallback(async ({ quiet = false, reason = 'manual' } = {}) => {
+        if (sessionRefreshPromiseRef.current) {
+            return sessionRefreshPromiseRef.current;
+        }
+
+        sessionRefreshPromiseRef.current = fetchSession()
+            .then((session) => {
+                myIdRef.current = session.clientId;
+                setMyId(prev => prev === session.clientId ? prev : session.clientId);
+                setSessionReady(true);
+                setSessionError('');
+                diagnostics.recordEvent('session_refreshed', {
+                    clientId: session.clientId,
+                    expiresAt: session.expiresAt,
+                    reason
+                });
+                if (!quiet) {
+                    log(`Anonymous session refreshed: ${session.clientId}`);
+                }
+                return session;
+            })
+            .catch((error) => {
+                diagnostics.reportIssue('session_refresh_failed', {
+                    message: error?.message || 'unknown',
+                    name: error?.name || 'Error',
+                    reason
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'session-refresh'
+                    }
+                });
+                if (!quiet) {
+                    setSessionError('匿名会话续期失败，请刷新页面重试。');
+                }
+                throw error;
+            })
+            .finally(() => {
+                sessionRefreshPromiseRef.current = null;
+            });
+
+        return sessionRefreshPromiseRef.current;
+    }, [diagnostics]);
     
     // 保存昵称到 localStorage
     useEffect(() => {
         if (nickname) {
             localStorage.setItem('nickname', nickname);
         }
+        nicknameRef.current = nickname;
     }, [nickname]);
+
+    useEffect(() => {
+        connectionStatusRef.current = connectionStatus;
+    }, [connectionStatus]);
+
+    useEffect(() => {
+        wsStatusRef.current = wsStatus;
+    }, [wsStatus]);
+
+    useEffect(() => {
+        rtcConfigRef.current = rtcConfig;
+    }, [rtcConfig]);
+
+    useEffect(() => {
+        onlineUsersRef.current = onlineUsers;
+    }, [onlineUsers]);
+
+    useEffect(() => {
+        if (!myId) {
+            setLastReadTime({});
+            return;
+        }
+
+        try {
+            const stored = localStorage.getItem(`lastReadTime_${myId}`);
+            setLastReadTime(stored ? JSON.parse(stored) : {});
+        } catch {
+            setLastReadTime({});
+        }
+    }, [myId]);
     
     // 房间管理 Hook
     const {
@@ -107,11 +227,11 @@ function ChatApp() {
         setShowRoomInput,
         setRoomInput,
         fetchRooms
-    } = useRoom();
+    } = useRoom({ diagnostics });
     
     // 聊天历史管理 Hook
     const { loadChatHistory, saveChatHistory, clearChatHistory } = useChatHistory(
-        myIdRef.current,
+        myId,
         currentRoom
     );
     
@@ -164,13 +284,17 @@ function ChatApp() {
     useEffect(() => {
         activeUserRef.current = activeUser;
     }, [activeUser]);
+
+    useEffect(() => {
+        currentRoomRef.current = currentRoom;
+    }, [currentRoom]);
     
     // 保存 lastReadTime 到 localStorage
     useEffect(() => {
-        if (Object.keys(lastReadTime).length > 0) {
+        if (myIdRef.current && Object.keys(lastReadTime).length > 0) {
             localStorage.setItem(`lastReadTime_${myIdRef.current}`, JSON.stringify(lastReadTime));
         }
-    }, [lastReadTime]);
+    }, [lastReadTime, myId]);
     
     // 滚动监听：滚动到底部时标记为已读
     useEffect(() => {
@@ -211,7 +335,7 @@ function ChatApp() {
     // 页面卸载时保存当前已读时间
     useEffect(() => {
         const handleBeforeUnload = () => {
-            if (activeUser !== undefined) {
+            if (myIdRef.current && activeUser !== undefined) {
                 const chatKey = activeUser === null ? '__global__' : activeUser;
                 const updatedTime = {
                     ...lastReadTime,
@@ -224,7 +348,7 @@ function ChatApp() {
         
         window.addEventListener('beforeunload', handleBeforeUnload);
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, [activeUser, lastReadTime]);
+    }, [activeUser, lastReadTime, myId]);
     
     const log = (msg) => setLogs(prev => [...prev, msg]);
     
@@ -382,7 +506,8 @@ function ChatApp() {
         myId: myIdRef.current,
         getDisplayName,
         blobUrlsRef,
-        activeUser
+        activeUser,
+        diagnostics
     });
 
     const updateOnlineUsers = (action, userId, list = null) => {
@@ -401,6 +526,377 @@ function ChatApp() {
         });
     };
 
+    const updatePeerConnectionStatus = useCallback((remoteId, patch) => {
+        if (!remoteId) return;
+
+        setConnectionStatus(prev => {
+            const current = prev[remoteId] || {
+                status: PEER_CHANNEL_STATUS.DISCONNECTED,
+                networkType: null,
+                localType: null,
+                remoteType: null,
+                lastPeerActivityAt: 0,
+                lastPeerActivitySource: '',
+                lastHeartbeatSentAt: 0,
+                staleSince: 0
+            };
+            const nextPatch = typeof patch === 'function' ? patch(current) : patch;
+            return {
+                ...prev,
+                [remoteId]: {
+                    ...current,
+                    ...nextPatch
+                }
+            };
+        });
+    }, []);
+
+    const removePeerConnectionStatus = useCallback((remoteId) => {
+        if (!remoteId) return;
+
+        setConnectionStatus(prev => {
+            if (!prev[remoteId]) {
+                return prev;
+            }
+            const next = { ...prev };
+            delete next[remoteId];
+            return next;
+        });
+    }, []);
+
+    const markPeerChannelAlive = useCallback((remoteId, source = 'datachannel') => {
+        if (!remoteId) return;
+
+        const now = Date.now();
+        const previous = connectionStatusRef.current[remoteId];
+        updatePeerConnectionStatus(remoteId, {
+            status: PEER_CHANNEL_STATUS.CONNECTED,
+            lastPeerActivityAt: now,
+            lastPeerActivitySource: source,
+            staleSince: 0
+        });
+
+        if (previous?.status === PEER_CHANNEL_STATUS.STALE) {
+            diagnostics.recordEvent('peer_channel_resumed', {
+                remoteId,
+                source,
+                idleForMs: previous.staleSince ? now - previous.staleSince : null
+            });
+        }
+    }, [diagnostics, updatePeerConnectionStatus]);
+
+    const isPeerChannelAvailable = useCallback((status) => (
+        status === PEER_CHANNEL_STATUS.CONNECTED || status === PEER_CHANNEL_STATUS.STALE
+    ), []);
+
+    const getSignalPresence = useCallback((userId) => {
+        if (!userId) {
+            return 'unknown';
+        }
+        if (wsStatusRef.current !== WS_STATUS.CONNECTED) {
+            return 'unknown';
+        }
+        return onlineUsersRef.current.has(userId) ? 'online' : 'offline';
+    }, []);
+
+    const clearPeerRecoveryTimer = useCallback((remoteId) => {
+        const peer = peersRef.current[remoteId];
+        if (peer?.iceRestartTimer) {
+            clearTimeout(peer.iceRestartTimer);
+            peer.iceRestartTimer = null;
+        }
+    }, []);
+
+    const resetPeerRecoveryState = useCallback((remoteId, { resetAttempts = false } = {}) => {
+        const peer = peersRef.current[remoteId];
+        if (!peer) {
+            return;
+        }
+
+        clearPeerRecoveryTimer(remoteId);
+        peer.iceRestartInFlight = false;
+        peer.pendingRestartReason = '';
+        if (resetAttempts) {
+            peer.iceRestartAttempts = 0;
+        }
+    }, [clearPeerRecoveryTimer]);
+
+    const shouldInitiatePeerConnection = useCallback((remoteId) => {
+        const localId = myIdRef.current;
+        if (!localId || !remoteId || localId === remoteId) {
+            return false;
+        }
+
+        // 用稳定的 ID 排序来决定谁先发 offer，避免双方刷新时同时发起协商。
+        return localId.localeCompare(remoteId) > 0;
+    }, []);
+
+    const isActivePeerInstance = useCallback((remoteId, instanceId) => {
+        return peersRef.current[remoteId]?.instanceId === instanceId;
+    }, []);
+
+    const cleanupPeerConnection = useCallback((remoteId, { removeStatus = true } = {}) => {
+        const peer = peersRef.current[remoteId];
+
+        if (connectionTimeoutRef.current[remoteId]) {
+            clearTimeout(connectionTimeoutRef.current[remoteId]);
+            delete connectionTimeoutRef.current[remoteId];
+        }
+
+        if (peer?.iceRestartTimer) {
+            clearTimeout(peer.iceRestartTimer);
+        }
+
+        if (peer?.dc) {
+            peer.dc.onopen = null;
+            peer.dc.onclose = null;
+            peer.dc.onerror = null;
+            peer.dc.onmessage = null;
+            try {
+                peer.dc.close();
+            } catch {
+                // 忽略已经关闭的 DataChannel。
+            }
+        }
+
+        if (peer?.pc) {
+            peer.pc.ondatachannel = null;
+            peer.pc.onicecandidate = null;
+            peer.pc.oniceconnectionstatechange = null;
+            peer.pc.onconnectionstatechange = null;
+            try {
+                peer.pc.close();
+            } catch {
+                // 忽略已经关闭的 PeerConnection。
+            }
+        }
+
+        delete peersRef.current[remoteId];
+        delete eventQueueRef.current[remoteId];
+        delete incomingFilesRef.current[remoteId];
+        delete pendingIceCandidatesRef.current[remoteId];
+
+        if (removeStatus) {
+            removePeerConnectionStatus(remoteId);
+            return;
+        }
+
+        updatePeerConnectionStatus(remoteId, {
+            status: PEER_CHANNEL_STATUS.DISCONNECTED,
+            networkType: null,
+            localType: null,
+            remoteType: null,
+            lastPeerActivityAt: 0,
+            lastPeerActivitySource: '',
+            lastHeartbeatSentAt: 0,
+            staleSince: 0
+        });
+    }, [incomingFilesRef, removePeerConnectionStatus, updatePeerConnectionStatus]);
+
+    const queuePendingIceCandidate = useCallback((remoteId, candidate) => {
+        if (!remoteId || !candidate) {
+            return;
+        }
+
+        if (!pendingIceCandidatesRef.current[remoteId]) {
+            pendingIceCandidatesRef.current[remoteId] = [];
+        }
+        pendingIceCandidatesRef.current[remoteId].push(candidate);
+    }, []);
+
+    const flushPendingIceCandidates = useCallback(async (remoteId) => {
+        const peer = peersRef.current[remoteId];
+        const queued = pendingIceCandidatesRef.current[remoteId];
+
+        if (!peer?.pc || !peer.pc.remoteDescription || !queued?.length) {
+            return;
+        }
+
+        const remaining = [];
+        for (const candidate of queued) {
+            try {
+                await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (error) {
+                diagnostics.reportIssue('queued_ice_candidate_apply_failed', {
+                    remoteId,
+                    message: error?.message || 'unknown',
+                    name: error?.name || 'Error'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'ice-candidate'
+                    }
+                });
+                remaining.push(candidate);
+            }
+        }
+
+        if (remaining.length > 0) {
+            pendingIceCandidatesRef.current[remoteId] = remaining;
+        } else {
+            delete pendingIceCandidatesRef.current[remoteId];
+        }
+    }, [diagnostics]);
+
+    const sendPeerOffer = useCallback(async (remoteId, { iceRestart = false, reason = 'offer' } = {}) => {
+        const peer = peersRef.current[remoteId];
+        if (!peer?.pc) {
+            return false;
+        }
+
+        const pc = peer.pc;
+        if (pc.signalingState !== 'stable') {
+            diagnostics.reportIssue('peer_offer_blocked_unstable_signaling', {
+                remoteId,
+                signalingState: pc.signalingState,
+                iceRestart,
+                reason
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'webrtc-offer'
+                }
+            });
+            return false;
+        }
+
+        if (iceRestart && typeof pc.restartIce === 'function') {
+            pc.restartIce();
+        }
+
+        try {
+            peer.makingOffer = true;
+            const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
+            const offerPayload = {
+                type: offer?.type || '',
+                sdp: offer?.sdp || ''
+            };
+
+            if (!offerPayload.type || !offerPayload.sdp) {
+                throw new Error('local_offer_description_missing');
+            }
+
+            await pc.setLocalDescription(offer);
+
+            const finalDescription = pc.localDescription?.type && pc.localDescription?.sdp
+                ? {
+                    type: pc.localDescription.type,
+                    sdp: pc.localDescription.sdp
+                }
+                : offerPayload;
+
+            const sent = sendSignal('offer', remoteId, {
+                ...finalDescription,
+                iceRestart,
+                restartReason: reason,
+                restartAttempt: peer.iceRestartAttempts || 0
+            });
+
+            if (!sent) {
+                throw new Error('signaling_unavailable');
+            }
+
+            diagnostics.recordEvent(iceRestart ? 'ice_restart_offer_sent' : 'webrtc_offer_sent', {
+                remoteId,
+                reason,
+                restartAttempt: peer.iceRestartAttempts || 0
+            });
+            return true;
+        } catch (error) {
+            if (iceRestart) {
+                peer.iceRestartInFlight = false;
+            }
+            diagnostics.reportIssue(iceRestart ? 'ice_restart_offer_failed' : 'webrtc_offer_create_failed', {
+                remoteId,
+                message: error?.message || 'unknown',
+                name: error?.name || 'Error',
+                signalingState: pc.signalingState,
+                reason
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: iceRestart ? 'ice-restart' : 'webrtc-offer'
+                }
+            });
+            return false;
+        } finally {
+            if (peersRef.current[remoteId] === peer) {
+                peer.makingOffer = false;
+            }
+        }
+    }, [diagnostics]);
+
+    const scheduleIceRestart = useCallback((remoteId, reason, delayMs = 1500) => {
+        const peer = peersRef.current[remoteId];
+        if (!peer?.pc || !peer.isInitiator) {
+            return;
+        }
+
+        if (peer.iceRestartInFlight || peer.iceRestartTimer) {
+            return;
+        }
+
+        peer.pendingRestartReason = reason;
+        diagnostics.recordEvent('ice_restart_scheduled', {
+            remoteId,
+            reason,
+            delayMs
+        });
+        peer.iceRestartTimer = setTimeout(async () => {
+            peer.iceRestartTimer = null;
+
+            const latestPeer = peersRef.current[remoteId];
+            if (!latestPeer?.pc) {
+                return;
+            }
+
+            const state = latestPeer.pc.iceConnectionState;
+            if (!['failed', 'disconnected'].includes(state)) {
+                return;
+            }
+
+            if (wsRef.current?.readyState !== WebSocket.OPEN) {
+                diagnostics.recordEvent('ice_restart_waiting_for_signal', {
+                    remoteId,
+                    reason,
+                    state
+                });
+                return;
+            }
+
+            latestPeer.iceRestartInFlight = true;
+            latestPeer.iceRestartAttempts = (latestPeer.iceRestartAttempts || 0) + 1;
+            latestPeer.pendingRestartReason = reason;
+
+            const sent = await sendPeerOffer(remoteId, {
+                iceRestart: true,
+                reason
+            });
+
+            if (!sent) {
+                latestPeer.iceRestartInFlight = false;
+                scheduleIceRestart(remoteId, `${reason}_retry`, 3000);
+                return;
+            }
+
+            latestPeer.iceRestartTimer = setTimeout(() => {
+                const retryPeer = peersRef.current[remoteId];
+                if (!retryPeer?.pc) {
+                    return;
+                }
+
+                retryPeer.iceRestartTimer = null;
+                if (
+                    retryPeer.iceRestartInFlight &&
+                    ['failed', 'disconnected'].includes(retryPeer.pc.iceConnectionState)
+                ) {
+                    retryPeer.iceRestartInFlight = false;
+                    scheduleIceRestart(remoteId, `${reason}_watchdog_retry`, 0);
+                }
+            }, 8000);
+        }, delayMs);
+    }, [diagnostics, sendPeerOffer]);
+
     // 清理连接的辅助函数
     const cleanupConnections = () => {
         // 清除重连定时器
@@ -416,10 +912,16 @@ function ChatApp() {
             wsRef.current.close();
             wsRef.current = null;
         }
+
+        setWsStatus(WS_STATUS.DISCONNECTED);
         
-        Object.values(peersRef.current).forEach(peer => {
+        Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
+            if (peer.iceRestartTimer) {
+                clearTimeout(peer.iceRestartTimer);
+            }
             if (peer.dc) peer.dc.close();
             if (peer.pc) peer.pc.close();
+            delete pendingIceCandidatesRef.current[remoteId];
         });
         peersRef.current = {};
         
@@ -432,6 +934,79 @@ function ChatApp() {
     };
 
     useEffect(() => {
+        const heartbeatTimer = setInterval(() => {
+            const now = Date.now();
+
+            Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
+                const channel = peer?.dc;
+                if (!channel || channel.readyState !== 'open') {
+                    return;
+                }
+
+                try {
+                    channel.send(JSON.stringify({
+                        type: PEER_HEARTBEAT_MESSAGE_TYPE,
+                        sentAt: now
+                    }));
+                    updatePeerConnectionStatus(remoteId, {
+                        lastHeartbeatSentAt: now
+                    });
+                } catch (error) {
+                    diagnostics.reportIssue('peer_heartbeat_send_failed', {
+                        remoteId,
+                        message: error?.message || 'unknown',
+                        readyState: channel.readyState
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'datachannel-heartbeat'
+                        }
+                    });
+                }
+            });
+        }, PEER_HEARTBEAT_INTERVAL_MS);
+
+        const staleSweepTimer = setInterval(() => {
+            const now = Date.now();
+
+            Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
+                const channel = peer?.dc;
+                if (!channel || channel.readyState !== 'open') {
+                    return;
+                }
+
+                const info = connectionStatusRef.current[remoteId];
+                const lastPeerActivityAt = info?.lastPeerActivityAt || 0;
+                if (!lastPeerActivityAt) {
+                    return;
+                }
+
+                const idleForMs = now - lastPeerActivityAt;
+                if (
+                    idleForMs >= PEER_STALE_THRESHOLD_MS &&
+                    info?.status === PEER_CHANNEL_STATUS.CONNECTED
+                ) {
+                    updatePeerConnectionStatus(remoteId, {
+                        status: PEER_CHANNEL_STATUS.STALE,
+                        staleSince: info?.staleSince || now
+                    });
+                    diagnostics.recordEvent('peer_channel_idle', {
+                        remoteId,
+                        idleForMs
+                    });
+                }
+            });
+        }, PEER_STALE_SWEEP_INTERVAL_MS);
+
+        return () => {
+            clearInterval(heartbeatTimer);
+            clearInterval(staleSweepTimer);
+        };
+    }, [diagnostics, updatePeerConnectionStatus]);
+
+    useEffect(() => {
+        let isMounted = true;
+
         // 页面可见性变化监听
         const handleVisibilityChange = () => {
             if (document.hidden) {
@@ -441,16 +1016,53 @@ function ChatApp() {
         };
         
         document.addEventListener('visibilitychange', handleVisibilityChange);
-        
-        // 如果有上次的房间，自动加入
-        if (currentRoom) {
-            joinRoom(currentRoom);
-        } else {
-            setShowRoomInput(true);
-            fetchRooms();
-        }
+
+        const initializeApp = async () => {
+            try {
+                const [session, config] = await Promise.all([
+                    fetchSession(),
+                    fetchIceConfig()
+                ]);
+
+                if (!isMounted) {
+                    return;
+                }
+
+                myIdRef.current = session.clientId;
+                setMyId(session.clientId);
+                setRtcConfig(config);
+                setSessionError('');
+                setSessionReady(true);
+                diagnostics.recordEvent('session_initialized', {
+                    clientId: session.clientId,
+                    expiresAt: session.expiresAt
+                });
+                diagnostics.recordEvent('ice_config_loaded', {
+                    provider: config.provider || 'default',
+                    iceServerCount: Array.isArray(config.iceServers) ? config.iceServers.length : 0
+                });
+            } catch (error) {
+                console.error('Failed to initialize session:', error);
+                if (!isMounted) {
+                    return;
+                }
+                diagnostics.reportIssue('session_initialization_failed', {
+                    message: error?.message || 'unknown',
+                    name: error?.name || 'Error'
+                }, {
+                    flush: 'immediate',
+                    context: {
+                        feature: 'session-bootstrap'
+                    }
+                });
+                setSessionError('无法初始化匿名会话，请刷新页面重试。');
+            }
+        };
+
+        initializeApp();
 
         return () => {
+            isMounted = false;
             document.removeEventListener('visibilitychange', handleVisibilityChange);
             cleanupConnections();
             // 清理所有 Blob URLs
@@ -458,9 +1070,54 @@ function ChatApp() {
             blobUrlsRef.current.clear();
         };
     }, []);
+
+    useEffect(() => {
+        if (!sessionReady) {
+            return;
+        }
+
+        diagnostics.retryPendingReports().then((count) => {
+            if (count > 0) {
+                diagnostics.recordEvent('pending_diagnostics_replayed', {
+                    count
+                });
+            }
+        });
+    }, [sessionReady, diagnostics]);
+
+    useEffect(() => {
+        if (wsStatus !== WS_STATUS.CONNECTED) {
+            return;
+        }
+
+        Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
+            if (!peer?.pc || !peer.isInitiator) {
+                return;
+            }
+
+            if (['failed', 'disconnected'].includes(peer.pc.iceConnectionState)) {
+                scheduleIceRestart(remoteId, 'signal_restored', 800);
+            }
+        });
+    }, [scheduleIceRestart, wsStatus]);
+
+    useEffect(() => {
+        if (!sessionReady || !myId || hasInitializedRoomRef.current) {
+            return;
+        }
+
+        hasInitializedRoomRef.current = true;
+
+        if (currentRoom) {
+            joinRoom(currentRoom, myId);
+        } else {
+            setShowRoomInput(true);
+            fetchRooms();
+        }
+    }, [sessionReady, myId]);
     
-    const joinRoom = (roomId) => {
-        if (!roomId.trim()) return;
+    const joinRoom = (roomId, currentUserId = myIdRef.current) => {
+        if (!roomId.trim() || !currentUserId) return;
         
         // 记录当前房间当前窗口的已读时间
         if (currentRoom && activeUser !== undefined) {
@@ -484,7 +1141,7 @@ function ChatApp() {
         // 清空未读计数（切换房间时）
         setUnreadCounts({});
         
-        setOnlineUsers(new Set([myIdRef.current]));
+        setOnlineUsers(new Set([currentUserId]));
         setCurrentRoom(roomId);
         setShowRoomInput(false);
         localStorage.setItem('lastRoom', roomId);
@@ -492,11 +1149,16 @@ function ChatApp() {
         // 连接到新房间，传递 isPrivate 参数
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const privateParam = isPrivate ? '&private=true' : '';
-        const wsUrl = `${protocol}//${window.location.host}/ws?id=${myIdRef.current}&room=${encodeURIComponent(roomId)}${privateParam}`;
+        const wsUrl = `${protocol}//${window.location.host}/ws?room=${encodeURIComponent(roomId)}${privateParam}`;
         connectWs(wsUrl);
         
         const privateStr = isPrivate ? ' (私有)' : '';
         log(`Joined room: ${roomId}${privateStr}`);
+        diagnostics.recordEvent('room_joined', {
+            roomId,
+            isPrivate,
+            clientId: currentUserId
+        });
         
         // 重置私有房间选项
         setIsPrivate(false);
@@ -505,7 +1167,7 @@ function ChatApp() {
     const reconnectTimeoutRef = useRef(null);
     const isManualCloseRef = useRef(false);
     
-    const connectWs = (url) => {
+    const connectWs = (url, { isReconnect = false } = {}) => {
         // 清除之前的重连定时器
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
@@ -518,6 +1180,7 @@ function ChatApp() {
             wsRef.current.close();
         }
         
+        setWsStatus(isReconnect ? WS_STATUS.RECONNECTING : WS_STATUS.CONNECTING);
         const ws = new WebSocket(url);
         wsRef.current = ws;
         isManualCloseRef.current = false;
@@ -526,6 +1189,10 @@ function ChatApp() {
             log("Connected to Signaling Server");
             // 连接成功，清除重连标记
             reconnectTimeoutRef.current = null;
+            setWsStatus(WS_STATUS.CONNECTED);
+            diagnostics.recordEvent('ws_opened', {
+                url
+            });
         };
 
         ws.onmessage = async (evt) => {
@@ -534,30 +1201,101 @@ function ChatApp() {
                 await handleSignalMessage(msg);
             } catch (err) {
                 console.error('Failed to parse WebSocket message:', err);
+                diagnostics.reportIssue('ws_message_parse_failed', {
+                    message: err?.message || 'unknown'
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'websocket'
+                    }
+                });
             }
         };
         
         ws.onerror = (error) => {
             console.error("WebSocket error:", error);
+            diagnostics.reportIssue('ws_error', {
+                url,
+                message: error?.message || 'WebSocket error event'
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'websocket'
+                }
+            });
         };
         
         ws.onclose = (event) => {
+            const closeData = {
+                url,
+                code: event.code,
+                wasClean: event.wasClean,
+                reason: event.reason
+            };
+            const isManualOrHiddenClose = isManualCloseRef.current || document.hidden;
+            const isAbnormalClose = event.code !== 1000 && !isManualOrHiddenClose;
+
+            if (isAbnormalClose) {
+                diagnostics.recordEvent('ws_closed', closeData);
+
+                const now = Date.now();
+                const burst = wsCloseBurstRef.current;
+                if (
+                    !burst.windowStartedAt ||
+                    now - burst.windowStartedAt > WS_CLOSE_REPORT_WINDOW_MS
+                ) {
+                    burst.count = 1;
+                    burst.windowStartedAt = now;
+                } else {
+                    burst.count += 1;
+                }
+
+                if (burst.count >= WS_CLOSE_REPORT_THRESHOLD) {
+                    diagnostics.reportIssue('ws_closed_repeatedly', {
+                        ...closeData,
+                        repeatedCount: burst.count,
+                        windowMs: WS_CLOSE_REPORT_WINDOW_MS
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'websocket'
+                        }
+                    });
+                    burst.count = 0;
+                    burst.windowStartedAt = now;
+                }
+            }
+
             // 如果是手动关闭或页面卸载，不自动重连
-            if (isManualCloseRef.current || document.hidden) {
+            if (isManualOrHiddenClose) {
+                setWsStatus(WS_STATUS.DISCONNECTED);
                 log("Connection closed");
                 return;
             }
             
             // 只有在非正常关闭时才重连
             if (event.code !== 1000) {
+                setWsStatus(WS_STATUS.RECONNECTING);
                 log("Connection lost. Reconnecting in 3 seconds...");
                 reconnectTimeoutRef.current = setTimeout(() => {
                     // 确保当前没有活跃连接
                     if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
-                        connectWs(url);
+                        void (async () => {
+                            try {
+                                await refreshAnonymousSession({
+                                    quiet: true,
+                                    reason: 'ws_reconnect'
+                                });
+                            } catch {
+                                // 后端如果此时还没起来，继续按原来的重连节奏尝试即可。
+                            }
+
+                            connectWs(url, { isReconnect: true });
+                        })();
                     }
                 }, 3000);
             } else {
+                setWsStatus(WS_STATUS.DISCONNECTED);
                 log("Disconnected from server");
             }
         };
@@ -570,6 +1308,18 @@ function ChatApp() {
             case 'user_joined':
                 log(`User ${from} joined`);
                 updateOnlineUsers('add', from);
+                if (peersRef.current[from]) {
+                    log(`User ${from} rejoined, resetting stale peer state`);
+                    cleanupPeerConnection(from, {
+                        removeStatus: false
+                    });
+                }
+                updatePeerConnectionStatus(from, {
+                    status: PEER_CHANNEL_STATUS.CONNECTING
+                });
+                if (shouldInitiatePeerConnection(from)) {
+                    await createPeerConnection(from, true);
+                }
                 // 发送我的昵称给新用户
                 if (nickname) {
                     sendSignal('nickname', from, { nickname });
@@ -588,7 +1338,13 @@ function ChatApp() {
                     updateOnlineUsers('set', null, [...payload, myIdRef.current]);
                     payload.forEach(id => {
                         log(`Found existing user ${id}`);
-                        createPeerConnection(id, true);
+                        if (shouldInitiatePeerConnection(id)) {
+                            void createPeerConnection(id, true);
+                        } else {
+                            updatePeerConnectionStatus(id, {
+                                status: PEER_CHANNEL_STATUS.CONNECTING
+                            });
+                        }
                         // 向每个已存在的用户发送我的昵称
                         if (nickname) {
                             setTimeout(() => sendSignal('nickname', id, { nickname }), 100);
@@ -599,28 +1355,7 @@ function ChatApp() {
             case 'user_left':
                 log(`User ${from} left`);
                 updateOnlineUsers('remove', from);
-                if (peersRef.current[from]) {
-                    // 完整清理 PeerConnection
-                    const peer = peersRef.current[from];
-                    if (peer.dc) peer.dc.close();
-                    if (peer.pc) peer.pc.close();
-                    delete peersRef.current[from];
-                }
-                // 清理该用户的连接超时定时器
-                if (connectionTimeoutRef.current[from]) {
-                    clearTimeout(connectionTimeoutRef.current[from]);
-                    delete connectionTimeoutRef.current[from];
-                }
-                // 清理该用户的事件队列
-                delete eventQueueRef.current[from];
-                // 清理该用户的文件传输状态
-                delete incomingFilesRef.current[from];
-                // 清理连接状态
-                setConnectionStatus(prev => {
-                    const next = { ...prev };
-                    delete next[from];
-                    return next;
-                });
+                cleanupPeerConnection(from);
                 // 如果正在与该用户私聊，切回全局聊天
                 if (activeUser === from) {
                     switchToUser(null);
@@ -628,21 +1363,139 @@ function ChatApp() {
                 }
                 break;
             case 'offer':
+                if (payload?.type !== 'offer' || !payload?.sdp) {
+                    diagnostics.reportIssue('webrtc_offer_payload_invalid', {
+                        from,
+                        receivedType: payload?.type ?? null,
+                        hasSdp: Boolean(payload?.sdp)
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'webrtc-offer'
+                        }
+                    });
+                    break;
+                }
                 await createPeerConnection(from, false);
-                const pc = peersRef.current[from].pc;
-                await pc.setRemoteDescription(new RTCSessionDescription(payload));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                sendSignal('answer', from, answer);
+                try {
+                    const peer = peersRef.current[from];
+                    if (!peer?.pc) {
+                        break;
+                    }
+                    const pc = peer.pc;
+                    if (pc.signalingState !== 'stable') {
+                        await pc.setLocalDescription({ type: 'rollback' });
+                    }
+                    await pc.setRemoteDescription(new RTCSessionDescription({
+                        type: payload.type,
+                        sdp: payload.sdp
+                    }));
+                    await flushPendingIceCandidates(from);
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    sendSignal('answer', from, {
+                        ...answer,
+                        iceRestart: payload?.iceRestart === true,
+                        restartReason: payload?.restartReason || ''
+                    });
+                    if (payload?.iceRestart) {
+                        diagnostics.recordEvent('ice_restart_offer_handled', {
+                            remoteId: from,
+                            restartReason: payload?.restartReason || 'unknown',
+                            restartAttempt: payload?.restartAttempt || 0
+                        });
+                    }
+                } catch (error) {
+                    diagnostics.reportIssue('webrtc_offer_handle_failed', {
+                        from,
+                        message: error?.message || 'unknown',
+                        name: error?.name || 'Error'
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'webrtc-offer'
+                        }
+                    });
+                }
                 break;
             case 'answer':
+                 if (payload?.type !== 'answer' || !payload?.sdp) {
+                     diagnostics.reportIssue('webrtc_answer_payload_invalid', {
+                         from,
+                         receivedType: payload?.type ?? null,
+                         hasSdp: Boolean(payload?.sdp)
+                     }, {
+                         delayMs: 1500,
+                         context: {
+                             feature: 'webrtc-answer'
+                         }
+                     });
+                     break;
+                 }
+
                  if (peersRef.current[from]) {
-                     await peersRef.current[from].pc.setRemoteDescription(new RTCSessionDescription(payload));
+                     try {
+                         await peersRef.current[from].pc.setRemoteDescription(new RTCSessionDescription({
+                             type: payload.type,
+                             sdp: payload.sdp
+                         }));
+                         await flushPendingIceCandidates(from);
+                         if (payload?.iceRestart) {
+                             diagnostics.recordEvent('ice_restart_answer_received', {
+                                 remoteId: from,
+                                 restartReason: payload?.restartReason || 'unknown'
+                             });
+                         }
+                         resetPeerRecoveryState(from);
+                     } catch (error) {
+                         diagnostics.reportIssue('webrtc_answer_handle_failed', {
+                             from,
+                             message: error?.message || 'unknown',
+                             name: error?.name || 'Error'
+                         }, {
+                             delayMs: 1500,
+                             context: {
+                                 feature: 'webrtc-answer'
+                             }
+                         });
+                     }
                  }
                 break;
             case 'candidate':
+                 if (!peersRef.current[from]) {
+                     queuePendingIceCandidate(from, payload);
+                     diagnostics.recordEvent('ice_candidate_buffered', {
+                         remoteId: from,
+                         reason: 'missing_peer'
+                     });
+                     break;
+                 }
+
                  if (peersRef.current[from]) {
-                     await peersRef.current[from].pc.addIceCandidate(new RTCIceCandidate(payload));
+                     const pc = peersRef.current[from].pc;
+                     if (!pc.remoteDescription) {
+                         queuePendingIceCandidate(from, payload);
+                         diagnostics.recordEvent('ice_candidate_buffered', {
+                             remoteId: from,
+                             reason: 'missing_remote_description'
+                         });
+                         break;
+                     }
+
+                     try {
+                         await pc.addIceCandidate(new RTCIceCandidate(payload));
+                     } catch (error) {
+                         diagnostics.reportIssue('ice_candidate_apply_failed', {
+                             from,
+                             message: error?.message || 'unknown',
+                             name: error?.name || 'Error'
+                         }, {
+                             delayMs: 1500,
+                             context: {
+                                 feature: 'ice-candidate'
+                             }
+                         });
+                     }
                  }
                 break;
             case 'file-done':
@@ -690,6 +1543,12 @@ function ChatApp() {
 
     const createPeerConnection = async (remoteId, initiator) => {
         if (peersRef.current[remoteId]) return;
+        diagnostics.recordEvent('peer_connection_creating', {
+            remoteId,
+            initiator
+        });
+
+        const instanceId = ++peerInstanceCounterRef.current;
 
         // 清除之前的超时定时器（如果存在）
         if (connectionTimeoutRef.current[remoteId]) {
@@ -697,21 +1556,32 @@ function ChatApp() {
         }
 
         // 设置连接状态为连接中
-        setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'connecting' } }));
+        updatePeerConnectionStatus(remoteId, {
+            status: PEER_CHANNEL_STATUS.CONNECTING
+        });
         
         // 设置连接超时（30秒）
         connectionTimeoutRef.current[remoteId] = setTimeout(() => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
+
             const peer = peersRef.current[remoteId];
             if (peer && (!peer.dc || peer.dc.readyState !== 'open')) {
                 log(`Connection timeout with ${remoteId}, retrying...`);
-                
-                // 清理旧连接
-                if (peer.dc) peer.dc.close();
-                if (peer.pc) peer.pc.close();
-                delete peersRef.current[remoteId];
-                
-                // 更新连接状态为断开
-                setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
+                diagnostics.reportIssue('peer_connection_timeout', {
+                    remoteId,
+                    initiator
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'peer-connection'
+                    }
+                });
+
+                cleanupPeerConnection(remoteId, {
+                    removeStatus: false
+                });
                 
                 // 如果我们是发起方，尝试重新连接
                 if (initiator) {
@@ -723,8 +1593,20 @@ function ChatApp() {
             }
         }, 30000); // 30秒超时
 
-        const pc = new RTCPeerConnection(ICE_SERVERS);
+        const pc = new RTCPeerConnection(rtcConfig);
         let dc;
+
+        peersRef.current[remoteId] = {
+            instanceId,
+            pc,
+            dc: null,
+            isInitiator: initiator,
+            iceRestartTimer: null,
+            iceRestartInFlight: false,
+            iceRestartAttempts: 0,
+            pendingRestartReason: '',
+            makingOffer: false
+        };
 
         if (initiator) {
             // 配置 DataChannel 以优化大文件传输
@@ -732,14 +1614,21 @@ function ChatApp() {
                 ordered: true,  // 保证顺序，文件传输需要
                 maxRetransmits: undefined  // 可靠传输
             });
-            setupDataChannel(dc, remoteId);
+            peersRef.current[remoteId].dc = dc;
+            setupDataChannel(dc, remoteId, instanceId);
         } else {
             pc.ondatachannel = (e) => {
-                setupDataChannel(e.channel, remoteId);
+                if (!isActivePeerInstance(remoteId, instanceId)) {
+                    try {
+                        e.channel.close();
+                    } catch {
+                        // 忽略已关闭通道。
+                    }
+                    return;
+                }
+                setupDataChannel(e.channel, remoteId, instanceId);
             };
         }
-
-        peersRef.current[remoteId] = { pc, dc: initiator ? dc : null };
         
         // 检测网络连接类型的辅助函数
         const detectNetworkType = () => {
@@ -765,17 +1654,14 @@ function ChatApp() {
                                         log(`${remoteId} 连接类型: ${networkType.toUpperCase()} (${localType} -> ${remoteType})`);
                                         
                                         // 更新连接状态，包含网络类型信息
-                                        setConnectionStatus(prev => ({
-                                            ...prev,
-                                            [remoteId]: {
-                                                status: 'connected',
-                                                networkType,
-                                                localAddress,
-                                                remoteAddress,
-                                                localType,
-                                                remoteType
-                                            }
-                                        }));
+                                        updatePeerConnectionStatus(remoteId, {
+                                            status: PEER_CHANNEL_STATUS.CONNECTED,
+                                            networkType,
+                                            localAddress,
+                                            remoteAddress,
+                                            localType,
+                                            remoteType
+                                        });
                                     }
                                 });
                             }
@@ -784,10 +1670,22 @@ function ChatApp() {
                 });
             }).catch(err => {
                 console.error('Failed to get connection stats:', err);
+                diagnostics.reportIssue('peer_stats_capture_failed', {
+                    remoteId,
+                    message: err?.message || 'unknown'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'peer-stats'
+                    }
+                });
             });
         };
 
         pc.onicecandidate = (e) => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             if (e.candidate) {
                 // 收集 ICE Candidates 用于局域网检测
                 if (e.candidate.address) {
@@ -803,44 +1701,55 @@ function ChatApp() {
 
         // 监听 ICE 连接状态变化，处理网络切换等情况
         pc.oniceconnectionstatechange = () => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             const state = pc.iceConnectionState;
             log(`ICE connection state with ${remoteId}: ${state}`);
             
             if (state === 'failed' || state === 'disconnected') {
-                log(`Connection ${state} with ${remoteId}, attempting to reconnect...`);
-                
-                // 延迟重连，避免频繁重试
-                setTimeout(() => {
-                    // 检查是否还在断开状态
-                    if (peersRef.current[remoteId] && 
-                        (peersRef.current[remoteId].pc.iceConnectionState === 'failed' || 
-                         peersRef.current[remoteId].pc.iceConnectionState === 'disconnected')) {
-                        
-                        // 清理旧连接
-                        const peer = peersRef.current[remoteId];
-                        if (peer) {
-                            if (peer.dc) peer.dc.close();
-                            if (peer.pc) peer.pc.close();
-                            delete peersRef.current[remoteId];
-                        }
-                        
-                        // 更新连接状态
-                        setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
-                        
-                        // 如果我们是发起方，尝试重新连接
-                        if (initiator) {
-                            log(`Initiating reconnection with ${remoteId}...`);
-                            setTimeout(() => {
-                                createPeerConnection(remoteId, true);
-                            }, 1000);
-                        }
+                log(`Connection ${state} with ${remoteId}, attempting ICE restart...`);
+                diagnostics.reportIssue('ice_connection_unstable', {
+                    remoteId,
+                    state
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'ice-state'
                     }
-                }, 2000); // 等待2秒，看连接是否能自动恢复
+                });
+                void diagnostics.capturePeerStats({
+                    peerId: remoteId,
+                    pc,
+                    peerType: 'webrtc',
+                    scopeType: 'call'
+                });
+
+                updatePeerConnectionStatus(remoteId, {
+                    status: PEER_CHANNEL_STATUS.STALE
+                });
+                scheduleIceRestart(
+                    remoteId,
+                    state === 'failed' ? 'ice_failed' : 'ice_disconnected',
+                    state === 'failed' ? 500 : 2000
+                );
             } else if (state === 'connected' || state === 'completed') {
                 log(`ICE connection established with ${remoteId}`);
+                diagnostics.recordEvent('ice_connection_established', {
+                    remoteId,
+                    state
+                });
+                resetPeerRecoveryState(remoteId, { resetAttempts: true });
+                markPeerChannelAlive(remoteId, 'ice_connected');
                 // ICE连接稳定后，延迟500ms检测网络类型（等待候选者对最终确定）
                 setTimeout(() => {
                     if (peersRef.current[remoteId]) {
+                        void diagnostics.capturePeerStats({
+                            peerId: remoteId,
+                            pc,
+                            peerType: 'webrtc',
+                            scopeType: 'call'
+                        });
                         detectNetworkType();
                     }
                 }, 500);
@@ -849,23 +1758,50 @@ function ChatApp() {
         
         // 监听整体连接状态
         pc.onconnectionstatechange = () => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             const state = pc.connectionState;
             log(`Connection state with ${remoteId}: ${state}`);
             
             if (state === 'failed') {
                 log(`Connection failed with ${remoteId}`);
-                setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
+                diagnostics.reportIssue('peer_connection_failed', {
+                    remoteId
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'peer-connection'
+                    }
+                });
+                void diagnostics.capturePeerStats({
+                    peerId: remoteId,
+                    pc,
+                    peerType: 'webrtc',
+                    scopeType: 'call'
+                });
+                updatePeerConnectionStatus(remoteId, {
+                    status: PEER_CHANNEL_STATUS.STALE
+                });
+                scheduleIceRestart(remoteId, 'peer_connection_failed', 500);
             }
         };
 
         if (initiator) {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            sendSignal('offer', remoteId, offer);
+            if (isActivePeerInstance(remoteId, instanceId)) {
+                await sendPeerOffer(remoteId, {
+                    iceRestart: false,
+                    reason: 'initial_offer'
+                });
+            }
         }
     };
 
-    const setupDataChannel = (dc, remoteId) => {
+    const setupDataChannel = (dc, remoteId, instanceId) => {
+        if (!isActivePeerInstance(remoteId, instanceId)) {
+            return;
+        }
+
         if (peersRef.current[remoteId]) {
             peersRef.current[remoteId].dc = dc;
         }
@@ -875,36 +1811,72 @@ function ChatApp() {
         dc.bufferedAmountLowThreshold = 0;
 
         dc.onopen = () => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             log(`Connected to ${remoteId}`);
+            diagnostics.recordEvent('datachannel_opened', {
+                remoteId
+            });
             // 清除连接超时定时器
             if (connectionTimeoutRef.current[remoteId]) {
                 clearTimeout(connectionTimeoutRef.current[remoteId]);
                 delete connectionTimeoutRef.current[remoteId];
             }
             // 更新连接状态为已连接（先设置基本状态）
-            setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'connected' } }));
+            updatePeerConnectionStatus(remoteId, {
+                status: PEER_CHANNEL_STATUS.CONNECTED,
+                lastPeerActivityAt: Date.now(),
+                lastPeerActivitySource: 'datachannel_open',
+                staleSince: 0
+            });
             // 注意：网络类型检测移到 ICE 状态变化监听中，等待连接稳定后再检测
         };
         
         dc.onclose = () => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             log(`DataChannel closed with ${remoteId}`);
+            diagnostics.recordEvent('datachannel_closed', {
+                remoteId
+            }, {
+                flush: true,
+                delayMs: 1000,
+                reason: 'datachannel_closed'
+            });
             // 清除连接超时定时器
             if (connectionTimeoutRef.current[remoteId]) {
                 clearTimeout(connectionTimeoutRef.current[remoteId]);
                 delete connectionTimeoutRef.current[remoteId];
             }
             // 更新连接状态为已断开
-            setConnectionStatus(prev => ({ ...prev, [remoteId]: { status: 'disconnected' } }));
+            updatePeerConnectionStatus(remoteId, {
+                status: PEER_CHANNEL_STATUS.DISCONNECTED
+            });
             // 清理该用户的事件队列
             delete eventQueueRef.current[remoteId];
         };
         
         dc.onerror = (error) => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             // DataChannel 错误通常是连接断开或关闭时的正常现象
             // 只有在 DataChannel 处于 open 状态时才是真正的错误
             if (dc.readyState === 'open' || dc.readyState === 'connecting') {
                 console.warn(`DataChannel error with ${remoteId}:`, error);
                 log(`⚠️ Connection issue with ${remoteId}`);
+                diagnostics.reportIssue('datachannel_error', {
+                    remoteId,
+                    readyState: dc.readyState,
+                    message: error?.message || 'DataChannel error'
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'datachannel'
+                    }
+                });
             }
             // readyState 为 'closing' 或 'closed' 时是正常清理，忽略
         };
@@ -915,6 +1887,9 @@ function ChatApp() {
         }
         
         dc.onmessage = (e) => {
+            if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
             // 添加到事件队列，保证顺序处理
             eventQueueRef.current[remoteId].enqueue(() => handleMessage(remoteId, e.data));
         };
@@ -925,7 +1900,18 @@ function ChatApp() {
         let tail = Promise.resolve();
         return {
             enqueue: (handler) => {
-                tail = tail.then(handler).catch(err => console.error('EventQueue error:', err));
+                tail = tail.then(handler).catch(err => {
+                    console.error('EventQueue error:', err);
+                    diagnostics.reportIssue('event_queue_handler_failed', {
+                        message: err?.message || 'unknown',
+                        name: err?.name || 'Error'
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'event-queue'
+                        }
+                    });
+                });
             }
         };
     };
@@ -933,6 +1919,7 @@ function ChatApp() {
     const handleMessage = async (remoteId, data) => {
         // 1. 处理二进制 chunk
         if (data instanceof ArrayBuffer) {
+            markPeerChannelAlive(remoteId, 'binary_chunk');
             handleBinaryChunk(remoteId, data);
             return;
         }
@@ -940,6 +1927,12 @@ function ChatApp() {
         // 2. 处理 JSON 消息
         try {
             const msg = JSON.parse(data);
+            if (msg.type === PEER_HEARTBEAT_MESSAGE_TYPE) {
+                markPeerChannelAlive(remoteId, 'heartbeat');
+                return;
+            }
+
+            markPeerChannelAlive(remoteId, 'datachannel_message');
             if (msg.type === 'cancel-transfer') {
                 // 发送端主动取消，通知接收端
                 const control = transferControlRef.current[`down-${msg.fileId}`];
@@ -1072,6 +2065,10 @@ function ChatApp() {
                 addChat({ from: remoteId, ...msg });
             }
         } catch {
+            diagnostics.recordEvent('datachannel_text_fallback', {
+                remoteId
+            });
+            markPeerChannelAlive(remoteId, 'text_fallback');
             addChat({ from: remoteId, text: data, type: 'text', mode: 'broadcast' });
         }
     };
@@ -1152,7 +2149,19 @@ function ChatApp() {
     const sendSignal = (type, to, payload) => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type, to, payload }));
+            return true;
         }
+        diagnostics.reportIssue('ws_send_while_closed', {
+            type,
+            to,
+            readyState: wsRef.current?.readyState ?? 'missing'
+        }, {
+            delayMs: 1000,
+            context: {
+                feature: 'websocket'
+            }
+        });
+        return false;
     };
     
     // 发送 DataChannel 消息（用于通话信令等）
@@ -1163,6 +2172,16 @@ function ChatApp() {
             peer.dc.send(JSON.stringify({ type, ...payload }));
             return true;
         }
+        diagnostics.reportIssue('datachannel_send_unavailable', {
+            type,
+            targetUserId,
+            readyState: peer?.dc?.readyState || 'missing'
+        }, {
+            delayMs: 1000,
+            context: {
+                feature: 'datachannel'
+            }
+        });
         return false;
     };
     
@@ -1192,7 +2211,8 @@ function ChatApp() {
         sendSignal: sendDataChannelMessage, // 通话信令通过 DataChannel 发送
         log,
         myId: myIdRef.current,
-        getDisplayName
+        getDisplayName,
+        diagnostics
     });
 
     const sendMessage = () => {
@@ -1212,12 +2232,28 @@ function ChatApp() {
             if (isPrivate) {
                 // Private Chat - 检查用户是否在线
                 const { dc } = peersRef.current[activeUser] || {};
-                const status = connectionStatus[activeUser];
+                const status = connectionStatus[activeUser]?.status;
                 
                 if (!dc || dc.readyState !== 'open') {
-                    if (status === 'connecting') {
+                    if (status === PEER_CHANNEL_STATUS.CONNECTING) {
+                        diagnostics.reportIssue('private_message_send_blocked_connecting', {
+                            targetUserId: activeUser
+                        }, {
+                            delayMs: 1000,
+                            context: {
+                                feature: 'message-send'
+                            }
+                        });
                         alert(`正在与 ${getDisplayName(activeUser)} 建立连接，请稍候...`);
                     } else {
+                        diagnostics.reportIssue('private_message_send_no_connection', {
+                            targetUserId: activeUser
+                        }, {
+                            delayMs: 1000,
+                            context: {
+                                feature: 'message-send'
+                            }
+                        });
                         alert(`无法发送消息：${getDisplayName(activeUser)} 未连接。`);
                     }
                     return;
@@ -1232,13 +2268,27 @@ function ChatApp() {
                 });
                 
                 const connectingPeers = Object.keys(connectionStatus).filter(id => 
-                    connectionStatus[id] === 'connecting'
+                    connectionStatus[id]?.status === PEER_CHANNEL_STATUS.CONNECTING
                 );
                 
                 if (activePeers.length === 0) {
                     if (connectingPeers.length > 0) {
+                        diagnostics.reportIssue('broadcast_message_send_blocked_connecting', {
+                            connectingPeerCount: connectingPeers.length
+                        }, {
+                            delayMs: 1000,
+                            context: {
+                                feature: 'message-send'
+                            }
+                        });
                         alert(`正在与 ${connectingPeers.length} 个用户建立连接，请稍候...`);
                     } else {
+                        diagnostics.reportIssue('broadcast_message_send_no_peers', {}, {
+                            delayMs: 1000,
+                            context: {
+                                feature: 'message-send'
+                            }
+                        });
                         alert('没有活跃连接。请等待其他用户加入。');
                     }
                     return;
@@ -1316,6 +2366,80 @@ function ChatApp() {
     });
 
     const currentChatName = activeUser === null ? 'Global Chat' : activeUser;
+    const knownUsers = Array.from(new Set([
+        ...onlineUsers,
+        ...Object.keys(connectionStatus)
+    ]));
+    const wsStatusConfig = {
+        [WS_STATUS.CONNECTING]: {
+            tone: 'bg-amber-100 text-amber-700 border-amber-200',
+            text: '信令连接中'
+        },
+        [WS_STATUS.CONNECTED]: {
+            tone: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+            text: '信令在线'
+        },
+        [WS_STATUS.RECONNECTING]: {
+            tone: 'bg-orange-100 text-orange-700 border-orange-200',
+            text: '信令重连中'
+        },
+        [WS_STATUS.DISCONNECTED]: {
+            tone: 'bg-slate-100 text-slate-600 border-slate-200',
+            text: '信令离线'
+        }
+    };
+    const currentWsStatus = wsStatusConfig[wsStatus] || wsStatusConfig[WS_STATUS.DISCONNECTED];
+    const activeConnectionInfo = activeUser ? connectionStatus[activeUser] : null;
+    const activePeerStatus = activeConnectionInfo?.status || PEER_CHANNEL_STATUS.DISCONNECTED;
+    const activeSignalPresence = activeUser ? getSignalPresence(activeUser) : 'unknown';
+    const activePeerLabel = activeUser === null
+        ? null
+        : ({
+            [PEER_CHANNEL_STATUS.CONNECTING]: 'P2P 建立中',
+            [PEER_CHANNEL_STATUS.CONNECTED]: activeConnectionInfo?.networkType === 'lan'
+                ? 'P2P 直连(局域网)'
+                : activeConnectionInfo?.networkType === 'wan'
+                    ? 'P2P 已连(公网)'
+                    : 'P2P 已连接',
+            [PEER_CHANNEL_STATUS.STALE]: 'P2P 静默待确认',
+            [PEER_CHANNEL_STATUS.DISCONNECTED]: 'P2P 未连接'
+        }[activePeerStatus] || 'P2P 未连接');
+    const activeSignalLabel = activeUser === null
+        ? null
+        : ({
+            online: '信令在线',
+            offline: '信令已离线',
+            unknown: currentWsStatus.text
+        }[activeSignalPresence] || currentWsStatus.text);
+
+    if (sessionError) {
+        return (
+            <div className="min-h-screen bg-blue-50 flex items-center justify-center p-6">
+                <div className="max-w-md w-full rounded-2xl border bg-white p-6 shadow-sm space-y-4">
+                    <div className="space-y-1">
+                        <h2 className="text-lg font-semibold text-slate-900">会话初始化失败</h2>
+                        <p className="text-sm text-slate-600">{sessionError}</p>
+                    </div>
+                    <Button onClick={() => window.location.reload()} className="w-full">
+                        重新加载
+                    </Button>
+                </div>
+            </div>
+        );
+    }
+
+    if (!sessionReady) {
+        return (
+            <div className="min-h-screen bg-blue-50 flex items-center justify-center p-6">
+                <div className="max-w-md w-full rounded-2xl border bg-white p-6 shadow-sm space-y-2">
+                    <h2 className="text-lg font-semibold text-slate-900">正在建立匿名会话</h2>
+                    <p className="text-sm text-slate-600">
+                        正在向服务端申请匿名身份并准备进入房间...
+                    </p>
+                </div>
+            </div>
+        );
+    }
 
     // 房间选择界面
     if (showRoomInput) {
@@ -1359,13 +2483,16 @@ function ChatApp() {
                     isSidebarOpen ? "translate-x-0 fixed inset-0" : "-translate-x-full fixed md:relative"
                 )}>
                     <div className="px-3 sm:px-4 py-3 sm:py-4 border-b">
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
                                 <div className="w-2 h-2 rounded-full bg-green-500"></div>
                                 <h2 className="font-semibold text-sm">
-                                    {onlineUsers.size} Online
+                                    {knownUsers.filter(user => user !== myIdRef.current).length} Peers
                                 </h2>
                             </div>
+                            <Badge variant="outline" className={cn("text-[10px] h-5 px-1.5 shrink-0", currentWsStatus.tone)}>
+                                {currentWsStatus.text}
+                            </Badge>
                             <button 
                                 className="md:hidden p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
                                 onClick={() => setIsSidebarOpen(false)}
@@ -1418,18 +2545,28 @@ function ChatApp() {
                         </div>
                         
                         {/* Individual Users */}
-                        {[...onlineUsers].map(user => {
+                        {knownUsers.map(user => {
                             if (user === myIdRef.current) return null; // Don't show myself in private chat list
                             const displayName = getDisplayName(user);
-                            const connInfo = connectionStatus[user] || { status: 'connecting' };
-                            const status = connInfo.status || 'connecting';
-                            const networkType = connInfo.networkType; // 'lan' or 'wan'
-                            const statusConfig = {
-                                connecting: { color: '#f59e0b', text: '连接中' },
-                                connected: { color: '#10b981', text: networkType === 'lan' ? '🏠局域网' : '🌐公网' },
-                                disconnected: { color: '#9ca3af', text: '离线' }
-                            };
-                            const currentStatus = statusConfig[status];
+                            const connInfo = connectionStatus[user] || { status: PEER_CHANNEL_STATUS.DISCONNECTED };
+                            const status = connInfo.status || PEER_CHANNEL_STATUS.DISCONNECTED;
+                            const networkType = connInfo.networkType;
+                            const signalPresence = getSignalPresence(user);
+                            const p2pLabel = {
+                                [PEER_CHANNEL_STATUS.CONNECTING]: 'P2P 建立中',
+                                [PEER_CHANNEL_STATUS.CONNECTED]: networkType === 'lan'
+                                    ? 'P2P 直连(局域网)'
+                                    : networkType === 'wan'
+                                        ? 'P2P 已连(公网)'
+                                        : 'P2P 已连接',
+                                [PEER_CHANNEL_STATUS.STALE]: 'P2P 静默待确认',
+                                [PEER_CHANNEL_STATUS.DISCONNECTED]: 'P2P 未连接'
+                            }[status] || 'P2P 未连接';
+                            const signalLabel = {
+                                online: '信令在线',
+                                offline: '信令已离线',
+                                unknown: currentWsStatus.text
+                            }[signalPresence];
                             
                             const unreadCount = unreadCounts[user] || 0;
                             
@@ -1462,9 +2599,10 @@ function ChatApp() {
                                             className={cn(
                                                 "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2",
                                                 activeUser === user ? "border-[#1e3a8a]" : "border-white",
-                                                status === 'connected' && "bg-green-500",
-                                                status === 'connecting' && "bg-amber-500",
-                                                status === 'disconnected' && "bg-blue-400"
+                                                status === PEER_CHANNEL_STATUS.CONNECTED && "bg-green-500",
+                                                status === PEER_CHANNEL_STATUS.CONNECTING && "bg-amber-500",
+                                                status === PEER_CHANNEL_STATUS.STALE && "bg-orange-400",
+                                                status === PEER_CHANNEL_STATUS.DISCONNECTED && "bg-slate-400"
                                             )}
                                         />
                                     </div>
@@ -1476,7 +2614,13 @@ function ChatApp() {
                                             "text-xs",
                                             activeUser === user ? "text-white/70" : "text-blue-500"
                                         )}>
-                                            {currentStatus.text}
+                                            {p2pLabel}
+                                        </span>
+                                        <span className={cn(
+                                            "text-[11px]",
+                                            activeUser === user ? "text-white/60" : "text-slate-400"
+                                        )}>
+                                            {signalLabel}
                                         </span>
                                     </div>
                                     {unreadCount > 0 && (
@@ -1518,6 +2662,19 @@ function ChatApp() {
                                 <Badge variant="secondary" className="text-xs h-5 px-2">
                                     {currentRoom}
                                 </Badge>
+                                <Badge variant="outline" className={cn("text-xs h-5 px-2", currentWsStatus.tone)}>
+                                    {currentWsStatus.text}
+                                </Badge>
+                                {activeUser !== null && (
+                                    <>
+                                        <Badge variant="outline" className="text-xs h-5 px-2 border-blue-200 text-blue-700">
+                                            {activePeerLabel}
+                                        </Badge>
+                                        <Badge variant="outline" className="text-xs h-5 px-2 border-slate-200 text-slate-600">
+                                            {activeSignalLabel}
+                                        </Badge>
+                                    </>
+                                )}
                                 {nickname ? (
                                     <div className="flex items-center gap-1">
                                         <span className="text-xs text-muted-foreground">
@@ -1547,7 +2704,7 @@ function ChatApp() {
                         </div>
                         
                         {/* 通话按钮 - 仅在私聊时显示 */}
-                        {activeUser !== null && connectionStatus[activeUser]?.status === 'connected' && (
+                        {activeUser !== null && isPeerChannelAvailable(activePeerStatus) && (
                             <div className="flex gap-1 shrink-0">
                                 <Button
                                     onClick={() => startCall(activeUser, false)}
@@ -1659,12 +2816,10 @@ function ChatApp() {
                     {Object.keys(fileProgress).length > 0 && (
                         <div className="px-4 py-3 border-t bg-white">
                             {Object.entries(fileProgress).map(([id, p]) => {
-                                // 对于上传进度条，id格式是 up-{fileId}-{targetId}，需要提取 fileId 和 targetId
                                 const isUpload = id.startsWith('up-');
-                                const parts = id.split('-');
-                                const fileId = isUpload ? parts.slice(0, 2).join('-') : id;
-                                const targetId = isUpload && parts.length > 2 ? parts[2] : null;
-                                const control = transferControlRef.current[fileId];
+                                const controlKey = p.controlKey || (isUpload ? id.split('-').slice(0, 2).join('-') : id);
+                                const targetId = p.targetId || null;
+                                const control = transferControlRef.current[controlKey];
                                 // 检查该目标是否暂停
                                 const isPaused = p.type === 'upload' && targetId 
                                     ? control?.subPaused[targetId] 
@@ -1684,7 +2839,7 @@ function ChatApp() {
                                                     try {
                                                         channel.send(JSON.stringify({
                                                             type: 'resume-transfer-by-sender',
-                                                            fileId: parts[1]
+                                                            fileId: controlKey.replace(/^up-/, '')
                                                         }));
                                                     } catch (e) {
                                                         console.error('Failed to send resume signal:', e);
@@ -1702,7 +2857,7 @@ function ChatApp() {
                                                     try {
                                                         channel.send(JSON.stringify({
                                                             type: 'pause-transfer-by-sender',
-                                                            fileId: parts[1]
+                                                            fileId: controlKey.replace(/^up-/, '')
                                                         }));
                                                     } catch (e) {
                                                         console.error('Failed to send pause signal:', e);

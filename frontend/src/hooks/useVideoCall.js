@@ -34,8 +34,9 @@ export const CALL_MESSAGE_TYPES = {
  * @param {Function} options.log - 日志函数
  * @param {string} options.myId - 当前用户 ID
  * @param {Function} options.getDisplayName - 获取显示名称的函数
+ * @param {Object} options.diagnostics - 诊断上报对象
  */
-export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }) {
+export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName, diagnostics }) {
     // 通话状态
     const [callStatus, setCallStatus] = useState(CALL_STATUS.IDLE);
     const [remoteUser, setRemoteUser] = useState(null); // 通话对方
@@ -65,6 +66,28 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
     
     // 来电铃声
     const ringtoneRef = useRef(null);
+
+    const recordCallEvent = useCallback((kind, data = {}, options = {}) => {
+        diagnostics?.recordEvent(kind, {
+            remoteUserId: remoteUserRef.current,
+            callStatus: callStatusRef.current,
+            ...data
+        }, {
+            scopeType: 'call',
+            ...options
+        });
+    }, [diagnostics]);
+
+    const reportCallIssue = useCallback((issueKey, data = {}, options = {}) => {
+        diagnostics?.reportIssue(issueKey, {
+            remoteUserId: remoteUserRef.current,
+            callStatus: callStatusRef.current,
+            ...data
+        }, {
+            scopeType: 'call',
+            ...options
+        });
+    }, [diagnostics]);
     
     /**
      * 获取本地媒体流（支持无摄像头/麦克风设备降级）
@@ -74,6 +97,15 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         if (!window.isSecureContext) {
             const msg = '⚠️ 摄像头/麦克风需要安全连接。请使用 localhost 或 HTTPS 访问，或在 Chrome 设置中添加例外：chrome://flags/#unsafely-treat-insecure-origin-as-secure';
             log(msg);
+            reportCallIssue('media_access_insecure_context', {
+                requestedVideo: video,
+                requestedAudio: audio
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'local-media'
+                }
+            });
             alert(msg);
             throw new Error('不安全的上下文');
         }
@@ -82,6 +114,15 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             const msg = '❌ 浏览器不支持摄像头/麦克风访问';
             log(msg);
+            reportCallIssue('media_devices_unsupported', {
+                requestedVideo: video,
+                requestedAudio: audio
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'local-media'
+                }
+            });
             alert(msg);
             throw new Error('不支持 getUserMedia');
         }
@@ -104,6 +145,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             });
         } catch (error) {
             log(`⚠️ 获取媒体失败 (video=${video}, audio=${audio}): ${error.message}`);
+            reportCallIssue('local_media_capture_failed', {
+                requestedVideo: video,
+                requestedAudio: audio,
+                message: error.message,
+                name: error.name || 'Error'
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'local-media'
+                }
+            });
             
             // 降级处理：如果请求了视频但失败，尝试只获取音频
             if (video && audio) {
@@ -114,8 +166,21 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
                     });
                     setIsVideoEnabled(false);
+                    recordCallEvent('local_media_audio_fallback', {
+                        requestedVideo: video,
+                        requestedAudio: audio
+                    });
                 } catch (audioError) {
                     log(`⚠️ 获取音频也失败: ${audioError.message}`);
+                    reportCallIssue('audio_only_fallback_failed', {
+                        message: audioError.message,
+                        name: audioError.name || 'Error'
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'local-media'
+                        }
+                    });
                 }
             }
             
@@ -125,6 +190,10 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 stream = new MediaStream();
                 setIsVideoEnabled(false);
                 setIsAudioEnabled(false);
+                recordCallEvent('local_media_receive_only_mode', {
+                    requestedVideo: video,
+                    requestedAudio: audio
+                });
             }
         }
         
@@ -140,6 +209,14 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         const peer = peersRef.current[targetUserId];
         if (!peer || !peer.pc) {
             log(`⚠️ 未找到与 ${targetUserId} 的连接`);
+            reportCallIssue('media_attach_missing_peer', {
+                targetUserId
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'track-attach'
+                }
+            });
             return;
         }
         
@@ -165,9 +242,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 });
             } catch (error) {
                 log(`❌ 重新协商失败: ${error.message}`);
+                reportCallIssue('webrtc_renegotiation_failed', {
+                    targetUserId,
+                    message: error.message,
+                    name: error.name || 'Error'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'renegotiation'
+                    }
+                });
             }
         }
-    }, [peersRef, log, sendSignal]);
+    }, [peersRef, log, sendSignal, reportCallIssue]);
     
     /**
      * 设置远端轨道监听
@@ -178,13 +265,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         
         peer.pc.ontrack = (event) => {
             log(`📹 收到远端 ${event.track.kind} 轨道`);
+            recordCallEvent('remote_track_received', {
+                targetUserId,
+                kind: event.track.kind
+            });
             if (!remoteStreamRef.current) {
                 remoteStreamRef.current = new MediaStream();
             }
             remoteStreamRef.current.addTrack(event.track);
             setRemoteStream(remoteStreamRef.current); // 触发重新渲染
         };
-    }, [peersRef, log]);
+    }, [peersRef, log, recordCallEvent]);
     
     /**
      * 发起通话
@@ -199,6 +290,11 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             setCallStatus(CALL_STATUS.CALLING);
             setRemoteUser(targetUserId);
             setIsVideoEnabled(videoEnabled);
+            recordCallEvent('call_started', {
+                targetUserId,
+                videoEnabled,
+                direction: 'outgoing'
+            });
             
             // 获取本地媒体流
             const stream = await getLocalStream(videoEnabled, true);
@@ -217,11 +313,22 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             return true;
         } catch (error) {
             log(`❌ 发起通话失败: ${error.message}`);
+            reportCallIssue('call_start_failed', {
+                targetUserId,
+                videoEnabled,
+                message: error.message,
+                name: error.name || 'Error'
+            }, {
+                flush: 'immediate',
+                context: {
+                    feature: 'call-start'
+                }
+            });
             setCallStatus(CALL_STATUS.IDLE);
             setRemoteUser(null);
             return false;
         }
-    }, [callStatus, getLocalStream, setupRemoteTrackListener, sendSignal, myId, getDisplayName, log]);
+    }, [callStatus, getLocalStream, setupRemoteTrackListener, sendSignal, myId, getDisplayName, log, recordCallEvent, reportCallIssue]);
     
     /**
      * 处理来电
@@ -238,12 +345,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         setCallStatus(CALL_STATUS.INCOMING);
         setRemoteUser(fromUserId);
         setIsVideoEnabled(payload.video);
+        recordCallEvent('incoming_call_received', {
+            fromUserId,
+            video: payload.video,
+            direction: 'incoming'
+        });
         
         log(`📲 收到来自 ${payload.callerName || fromUserId} 的${payload.video ? '视频' : '语音'}通话请求`);
         
         // 播放来电铃声（可选）
         // playRingtone();
-    }, [sendSignal, getDisplayName, log]);
+    }, [sendSignal, getDisplayName, log, recordCallEvent]);
     
     /**
      * 清理通话资源（必须在 acceptCall/rejectCall 等函数之前定义）
@@ -320,6 +432,10 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             });
             
             setCallStatus(CALL_STATUS.CONNECTED);
+            recordCallEvent('call_accepted', {
+                targetUserId: currentRemoteUser,
+                videoEnabled: isVideoEnabled
+            });
             log(`✅ 已接听 ${getDisplayName(currentRemoteUser)} 的通话`);
             
             // 停止铃声
@@ -328,11 +444,21 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             return true;
         } catch (error) {
             log(`❌ 接听失败: ${error.message}`);
+            reportCallIssue('call_accept_failed', {
+                targetUserId: currentRemoteUser,
+                message: error.message,
+                name: error.name || 'Error'
+            }, {
+                flush: 'immediate',
+                context: {
+                    feature: 'call-accept'
+                }
+            });
             // 接听失败时直接清理资源（不发拒绝信令，因为还没成功建立连接）
             cleanupCall();
             return false;
         }
-    }, [isVideoEnabled, getLocalStream, setupRemoteTrackListener, addTracksToConnection, sendSignal, getDisplayName, log, cleanupCall]);
+    }, [isVideoEnabled, getLocalStream, setupRemoteTrackListener, addTracksToConnection, sendSignal, getDisplayName, log, cleanupCall, recordCallEvent, reportCallIssue]);
     
     /**
      * 处理对方接听
@@ -350,9 +476,13 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         }
         
         setCallStatus(CALL_STATUS.CONNECTED);
+        recordCallEvent('call_connected', {
+            fromUserId,
+            videoEnabled: payload.video
+        });
         setRemoteVideoEnabled(payload.video);
         log(`✅ ${getDisplayName(fromUserId)} 已接听通话`);
-    }, [addTracksToConnection, getDisplayName, log]);
+    }, [addTracksToConnection, getDisplayName, log, recordCallEvent]);
     
     /**
      * 拒绝来电
@@ -363,13 +493,17 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         if (currentRemoteUser) {
             sendSignal(CALL_MESSAGE_TYPES.CALL_REJECT, currentRemoteUser, {});
             log(`❌ 已拒绝 ${getDisplayName(currentRemoteUser)} 的来电`);
+            recordCallEvent('call_rejected_by_local_user', {
+                targetUserId: currentRemoteUser
+            });
         }
         
         // 停止铃声
         // stopRingtone();
         
         cleanupCall();
-    }, [sendSignal, getDisplayName, log, cleanupCall]);
+        void diagnostics?.flushIfIssues('call_rejected');
+    }, [sendSignal, getDisplayName, log, cleanupCall, recordCallEvent, diagnostics]);
     
     /**
      * 处理对方拒绝
@@ -378,9 +512,13 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         // 使用 ref 获取最新状态
         if (callStatusRef.current === CALL_STATUS.CALLING && remoteUserRef.current === fromUserId) {
             log(`📵 ${getDisplayName(fromUserId)} 拒绝了通话`);
+            recordCallEvent('call_rejected_by_remote_user', {
+                fromUserId
+            });
             cleanupCall();
+            void diagnostics?.flushIfIssues('call_rejected_by_remote');
         }
-    }, [getDisplayName, log, cleanupCall]);
+    }, [getDisplayName, log, cleanupCall, recordCallEvent, diagnostics]);
     
     /**
      * 结束通话
@@ -390,9 +528,13 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         if (remoteUserRef.current) {
             sendSignal(CALL_MESSAGE_TYPES.CALL_END, remoteUserRef.current, {});
             log(`📴 已结束与 ${getDisplayName(remoteUserRef.current)} 的通话`);
+            recordCallEvent('call_ended_by_local_user', {
+                targetUserId: remoteUserRef.current
+            });
         }
         cleanupCall();
-    }, [sendSignal, getDisplayName, log, cleanupCall]);
+        void diagnostics?.flushIfIssues('call_ended');
+    }, [sendSignal, getDisplayName, log, cleanupCall, recordCallEvent, diagnostics]);
     
     /**
      * 处理对方结束通话
@@ -401,9 +543,13 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         // 使用 ref 获取最新状态
         if (remoteUserRef.current === fromUserId) {
             log(`📴 ${getDisplayName(fromUserId)} 结束了通话`);
+            recordCallEvent('call_ended_by_remote_user', {
+                fromUserId
+            });
             cleanupCall();
+            void diagnostics?.flushIfIssues('call_remote_end');
         }
-    }, [getDisplayName, log, cleanupCall]);
+    }, [getDisplayName, log, cleanupCall, recordCallEvent, diagnostics]);
     
     /**
      * 切换视频开关
@@ -465,9 +611,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 log('📹 摄像头已开启');
             } catch (error) {
                 log(`❌ 开启摄像头失败: ${error.message}`);
+                reportCallIssue('camera_enable_failed', {
+                    targetUserId: currentRemoteUser,
+                    message: error.message,
+                    name: error.name || 'Error'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'toggle-video'
+                    }
+                });
             }
         }
-    }, [peersRef, sendSignal, log]);
+    }, [peersRef, sendSignal, log, reportCallIssue]);
     
     /**
      * 切换音频开关
@@ -551,6 +707,16 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                     log('🔄 已发送屏幕共享重新协商');
                 } catch (err) {
                     log(`⚠️ 屏幕共享重新协商失败: ${err.message}`);
+                    reportCallIssue('screen_share_renegotiation_failed', {
+                        targetUserId: currentRemoteUser,
+                        message: err.message,
+                        name: err.name || 'Error'
+                    }, {
+                        delayMs: 1500,
+                        context: {
+                            feature: 'screen-share'
+                        }
+                    });
                 }
             }
             
@@ -563,6 +729,9 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             };
             
             setIsScreenSharing(true);
+            recordCallEvent('screen_share_started', {
+                targetUserId: currentRemoteUser
+            });
             
             // 通知对方
             sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_START, currentRemoteUser, {});
@@ -571,9 +740,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             return true;
         } catch (error) {
             log(`❌ 屏幕共享失败: ${error.message}`);
+            reportCallIssue('screen_share_start_failed', {
+                targetUserId: currentRemoteUser,
+                message: error.message,
+                name: error.name || 'Error'
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'screen-share'
+                }
+            });
             return false;
         }
-    }, [peersRef, sendSignal, log]);
+    }, [peersRef, sendSignal, log, recordCallEvent, reportCallIssue]);
     
     /**
      * 停止屏幕共享
@@ -621,6 +800,16 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
                 });
             } catch (err) {
                 log(`⚠️ 停止共享重新协商失败: ${err.message}`);
+                reportCallIssue('screen_share_stop_renegotiation_failed', {
+                    targetUserId: currentRemoteUser,
+                    message: err.message,
+                    name: err.name || 'Error'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'screen-share'
+                    }
+                });
             }
         }
         
@@ -638,8 +827,11 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             sendSignal(CALL_MESSAGE_TYPES.SCREEN_SHARE_STOP, currentRemoteUser, {});
         }
         
+        recordCallEvent('screen_share_stopped', {
+            targetUserId: currentRemoteUser
+        });
         log('🖥️ 屏幕共享已停止');
-    }, [isScreenSharing, peersRef, sendSignal, log]);
+    }, [isScreenSharing, peersRef, sendSignal, log, recordCallEvent, reportCallIssue]);
     
     /**
      * 处理视频 offer（接收端收到发送端的重新协商请求）
@@ -648,6 +840,14 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         const peer = peersRef.current[fromUserId];
         if (!peer || !peer.pc) {
             log(`⚠️ 收到 video-offer 但未找到连接`);
+            reportCallIssue('video_offer_missing_peer', {
+                fromUserId
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'video-renegotiation'
+                }
+            });
             return;
         }
         
@@ -674,8 +874,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             log(`📤 已发送视频 answer`);
         } catch (error) {
             log(`❌ 处理 video-offer 失败: ${error.message}`);
+            reportCallIssue('video_offer_handle_failed', {
+                fromUserId,
+                message: error.message,
+                name: error.name || 'Error',
+                signalingState: pc.signalingState
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'video-renegotiation'
+                }
+            });
         }
-    }, [peersRef, sendSignal, log]);
+    }, [peersRef, sendSignal, log, reportCallIssue]);
     
     /**
      * 处理视频 answer（发送端收到接收端的回应）
@@ -684,6 +895,14 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
         const peer = peersRef.current[fromUserId];
         if (!peer || !peer.pc) {
             log(`⚠️ 收到 video-answer 但未找到连接`);
+            reportCallIssue('video_answer_missing_peer', {
+                fromUserId
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'video-renegotiation'
+                }
+            });
             return;
         }
         
@@ -693,8 +912,19 @@ export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName }
             log(`✅ 视频连接已建立`);
         } catch (error) {
             log(`❌ 处理 video-answer 失败: ${error.message}`);
+            reportCallIssue('video_answer_handle_failed', {
+                fromUserId,
+                message: error.message,
+                name: error.name || 'Error',
+                signalingState: peer.pc.signalingState
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'video-renegotiation'
+                }
+            });
         }
-    }, [peersRef, log]);
+    }, [peersRef, log, reportCallIssue]);
     
     /**
      * 处理通话相关信令消息

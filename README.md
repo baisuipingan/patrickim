@@ -1,9 +1,9 @@
-# Patrick IM
+# patrick-im
 
-一个现代化、高性能的点对点（P2P）即时通讯系统。它利用 WebRTC 技术实现端到端的加密通信，无需中心化服务器存储消息，真正保护用户隐私。系统能够智能识别网络环境，在局域网内自动直连以获得最高速度，在公网环境下通过 STUN 实现穿透连接。
+一个现代化、高性能的点对点（P2P）即时通讯系统。它利用 WebRTC 技术实现端到端的加密通信，无需中心化服务器存储消息，真正保护用户隐私。系统能够智能识别网络环境，在局域网内自动直连以获得最高速度，在公网环境下通过 STUN/TURN 实现穿透连接。当前版本采用 Rust 信令服务，并由服务端签发匿名会话，无需注册登录即可直接进房间。
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Go](https://img.shields.io/badge/backend-Go%201.21-00ADD8.svg)
+![Rust](https://img.shields.io/badge/backend-Rust%20%2B%20Axum-orange.svg)
 ![React](https://img.shields.io/badge/frontend-React%2018-61DAFB.svg)
 
 ## ✨ 核心特性
@@ -26,12 +26,14 @@
   - 智能滚动：有未读消息时自动定位到第一条未读，无未读时直达底部
 - **消息持久化**：聊天记录存储在本地浏览器中，刷新页面不丢失，且数据完全由用户掌控。
 - **多模式聊天**：支持全局广播（Global Chat）和私密点对点聊天（Private Chat）。
+- **房间即入口**：默认匿名入站，无需登录，进入网站后直接选房间或输入房间号即可加入。
 
 ### 📞 音视频通话
 - **高清视频通话**：基于 WebRTC 的点对点视频通话，支持 720p 高清画质。
 - **语音通话**：纯语音通话模式，节省带宽。
 - **动态切换**：通话中可随时开关摄像头和麦克风。
 - **设备兼容**：自动检测设备，无摄像头/麦克风也可接收对方音视频（仅接收模式）。
+- **双连接架构**：数据通道和媒体通道分离，聊天/文件传输不会再直接拖慢音视频协商。
 
 ### 🖥️ 屏幕共享
 - **一键共享**：通话中随时开启屏幕共享，支持共享整个屏幕、应用窗口或浏览器标签页。
@@ -46,9 +48,9 @@
 ## 🛠️ 技术栈
 
 **后端 (Backend)**
-- **Go 1.21**: 高性能并发处理
-- **Gorilla WebSocket**: 可靠的信令交换通道
-- **并发安全**: 完善的锁机制和协程管理
+- **Rust + Axum + Tokio**: 高性能异步信令服务
+- **WebSocket**: 可靠的信令交换通道
+- **匿名会话 Cookie**: 服务端签发匿名身份，不再信任前端自报 `userId`
 
 **前端 (Frontend)**
 - **React 18**: 组件化 UI 开发
@@ -60,16 +62,22 @@
 
 ## 🚀 快速开始
 
-### 方式一：Docker 部署（推荐）
+### 方式一：Docker Compose 部署（推荐）
 
-最简单的部署方式，只需一条命令即可拥有自己的 IM 服务。
+当前推荐使用 `Rust app + Nginx` 的双容器部署方式。
 
 ```bash
-# 构建并启动容器
-docker run -d -p 3456:3456 --name patrick-im registry.cn-qingdao.aliyuncs.com/patrickcmh/patrick-im:latest
+# 1. 准备环境变量
+cp .env.example .env
+
+# 2. 至少设置一个稳定的匿名会话密钥
+# SESSION_SECRET=请替换成一串足够长的随机字符串
+
+# 3. 构建并启动
+docker compose up -d --build
 ```
 
-访问 `http://localhost:3456` 即可使用。
+默认通过 Nginx 暴露在 `http://localhost`。
 
 ### 方式二：本地源码运行
 
@@ -80,15 +88,48 @@ docker run -d -p 3456:3456 --name patrick-im registry.cn-qingdao.aliyuncs.com/pa
 git clone https://github.com/your-repo/patrickim.git
 cd patrickim
 
-# 2. 构建前端
+# 2. 准备本地环境变量（推荐）
+cp .env.example .env
+# 至少给 SESSION_SECRET 一个固定值，避免后端重启后匿名 session 全部失效
+
+# 3. 构建前端
 cd frontend
 npm install
 npm run build
 cd ..
 
-# 3. 运行后端
-go run .
+# 4. 运行后端
+cargo run
 ```
+
+如果你要调试音视频，还有两个常用方式：
+
+```bash
+# 桌面浏览器本机调试
+# localhost 在多数现代浏览器里本身就属于安全上下文
+# Vite 会把 /api 和 /ws 自动代理到本地 Rust 后端（默认 http://127.0.0.1:3456）
+cd frontend
+npm run dev
+
+# 局域网设备 / 本地 HTTPS 调试
+# 适合手机、平板或通过本机 IP 访问时测试摄像头和麦克风权限
+# 同样会自动代理到本地 Rust 后端
+cd frontend
+npm run dev:https
+```
+
+说明：
+- `cargo run` 现在会自动读取项目根目录下的 `.env.local` 和 `.env`；显式传入的 shell 环境变量优先级更高。
+- 启动前记得先在项目根目录运行 `cargo run`，本地开发代理默认把请求转给 `http://127.0.0.1:3456`。
+- 如果你的后端不是这个地址，可以设置环境变量 `VITE_DEV_BACKEND_ORIGIN`，例如 `VITE_DEV_BACKEND_ORIGIN=http://192.168.1.10:3456 npm run dev:https`。
+- `http://localhost` 或 `http://127.0.0.1` 在大多数桌面浏览器里可以直接调用 `getUserMedia`。
+- `http://192.168.x.x` 这类局域网 IP 通常不算安全上下文，测试音视频时建议用 `npm run dev:https`。
+- `dev:https` 基于 Vite 的本地 HTTPS 证书能力启动，浏览器首次访问可能需要手动确认一次证书。
+
+匿名会话说明：
+- `GET /api/session` 会由服务端签发匿名 Cookie，浏览器后续连接 `/ws` 时自动携带。
+- 生产环境建议显式设置 `SESSION_SECRET`；如果不配置，服务重启后匿名会话会失效。
+- 本地开发如果不设置固定的 `SESSION_SECRET`，旧标签页在服务重启后会短暂出现 `invalid anonymous session` 警告；刷新页面或等待前端自动续期即可恢复。
 
 ## 📝 开发计划
 

@@ -1,30 +1,25 @@
 # Build frontend first
-FROM node:18 AS frontend-builder
-WORKDIR /app
+FROM node:20-bookworm-slim AS frontend-builder
+WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm install
-COPY frontend .
-# Wails normally generates this, but we don't need it anymore.
-# However, if you have imports relying on it, you might need to mock or remove them.
-# We already cleaned up App.jsx.
+RUN npm ci
+COPY frontend/ ./
 RUN npm run build
 
 # Build backend
-FROM golang:1.21 AS backend-builder
+FROM rust:1.93-bookworm AS backend-builder
 WORKDIR /app
-# Set GOPROXY for faster and reliable downloads in China
-ENV GOPROXY=https://goproxy.cn,direct
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-# Copy the built frontend assets into the expected location for embedding
-COPY --from=frontend-builder /app/dist ./frontend/dist
-# Build a static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o server .
+COPY Cargo.toml ./
+COPY src ./src
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+RUN cargo build --release
 
-# Final lightweight image
-FROM alpine:latest
-WORKDIR /root/
-COPY --from=backend-builder /app/server .
+# Final runtime image
+FROM debian:bookworm-slim
+WORKDIR /app
+RUN useradd --system --uid 10001 --home-dir /app appuser
+COPY --from=backend-builder /app/target/release/patrick-im-server ./server
+USER appuser
 EXPOSE 3456
+ENV APP_PORT=3456
 CMD ["./server"]

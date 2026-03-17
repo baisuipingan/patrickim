@@ -1,3 +1,13 @@
 build/bin
 node_modules
 frontend/dist
+target
+diagnostics
+patrick-im
+patrick-im.exe
+patrick-im-server
+patrick-im-server.exe
+.env
+.env.local
+.env.*
+!.env.example

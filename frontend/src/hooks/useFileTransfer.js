@@ -1,6 +1,15 @@
 import { useState, useRef, useCallback } from 'react';
 import { formatSize, formatSpeed, formatTime } from '../utils/formatters';
 import { isImageFile, isModernFileAPISupported } from '../utils/fileUtils';
+import { FILE_TRANSFER_CONFIG } from '../constants/config';
+
+const {
+    CHUNK_SIZE,
+    MAX_CHUNKS_PER_BURST,
+    MAX_BUFFERED_AMOUNT,
+    BUFFER_LOW_THRESHOLD,
+    PROGRESS_UPDATE_INTERVAL
+} = FILE_TRANSFER_CONFIG;
 
 /**
  * useFileTransfer Hook
@@ -14,21 +23,45 @@ import { isImageFile, isModernFileAPISupported } from '../utils/fileUtils';
  * @param {Function} params.getDisplayName - 获取显示名称函数
  * @param {Object} params.blobUrlsRef - Blob URLs 引用，用于清理
  * @param {string|null} params.activeUser - 当前私聊用户 ID（null 表示广播）
+ * @param {Object} params.diagnostics - 诊断上报对象
  * @returns {Object} 文件传输相关的状态和方法
  */
-export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, blobUrlsRef, activeUser }) {
+export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, blobUrlsRef, activeUser, diagnostics }) {
     const [fileProgress, setFileProgress] = useState({});
     
     const transferControlRef = useRef({});
     const incomingFilesRef = useRef({});
     const fileQueueRef = useRef([]);
     const isSendingFileRef = useRef(false);
+
+    const recordFileEvent = useCallback((kind, data = {}, options = {}) => {
+        diagnostics?.recordEvent(kind, data, {
+            scopeType: 'file-transfer',
+            ...options
+        });
+    }, [diagnostics]);
+
+    const reportFileIssue = useCallback((issueKey, data = {}, options = {}) => {
+        diagnostics?.reportIssue(issueKey, data, {
+            scopeType: 'file-transfer',
+            ...options
+        });
+    }, [diagnostics]);
     
     /**
      * 发送文件
      */
     const sendFile = useCallback(async (file) => {
         if (file.size > 50 * 1024 * 1024 * 1024) {
+            reportFileIssue('file_too_large', {
+                fileName: file.name,
+                size: file.size
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'file-send'
+                }
+            });
             alert(`文件 "${file.name}" 过大（最大支持 50GB）\n当前文件大小：${formatSize(file.size)}`);
             return;
         }
@@ -44,7 +77,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             processFileQueue();
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeUser]);
+    }, [activeUser, reportFileIssue]);
     
     /**
      * 处理文件队列
@@ -62,6 +95,17 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         } catch (error) {
             console.error('Failed to send file:', error);
             log(`发送文件失败: ${queueItem.file.name} - ${error.message}`);
+            reportFileIssue('file_send_failed', {
+                fileName: queueItem.file.name,
+                targetUser: queueItem.targetUser,
+                message: error.message,
+                name: error.name || 'Error'
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'file-send'
+                }
+            });
         } finally {
             // 确保即使出错也能重置状态
             isSendingFileRef.current = false;
@@ -81,13 +125,21 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
      */
     const sendFileActual = useCallback(async (file, targetUser) => {
         const fileId = Math.random().toString(36).substr(2, 9);
-        const chunkSize = 64 * 1024; // 64KB - WebRTC 推荐的最大值
+        const chunkSize = CHUNK_SIZE;
         const totalChunks = Math.ceil(file.size / chunkSize);
         
         // 检查文件是否有效
         if (!file || file.size === undefined) {
             throw new Error('Invalid file object');
         }
+
+        recordFileEvent('file_send_started', {
+            fileId,
+            fileName: file.name,
+            size: file.size,
+            targetUser,
+            mode: targetUser !== null ? 'private' : 'broadcast'
+        });
         
         // 立即显示"准备中"状态的进度条
         setFileProgress(prev => ({
@@ -151,6 +203,17 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         
         if (targets.length === 0) {
             log('No connected peers to send file');
+            reportFileIssue('file_send_no_connected_peers', {
+                fileId,
+                fileName: file.name,
+                targetUser,
+                mode: isPrivate ? 'private' : 'broadcast'
+            }, {
+                delayMs: 1000,
+                context: {
+                    feature: 'file-send'
+                }
+            });
             return;
         }
         
@@ -298,6 +361,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         if (!ctrl || ctrl.cancelled) {
             // 已被取消，不添加到聊天记录
             log(`File cancelled: ${file.name}`);
+            recordFileEvent('file_send_cancelled', {
+                fileId,
+                fileName: file.name
+            });
             // 清理所有相关的进度条
             setFileProgress(prev => {
                 const next = { ...prev };
@@ -333,7 +400,13 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         }
         
         log(`File sent: ${file.name}`);
-    }, [log, peersRef, getDisplayName, addChat, blobUrlsRef, setFileProgress]);
+        recordFileEvent('file_send_completed', {
+            fileId,
+            fileName: file.name,
+            size: file.size,
+            targetCount: targets.length
+        });
+    }, [log, peersRef, getDisplayName, addChat, blobUrlsRef, setFileProgress, recordFileEvent, reportFileIssue]);
     
     /**
      * 向单个 Channel 发送文件
@@ -343,9 +416,34 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             let offset = 0;
             const startTime = Date.now();
             let lastTime = startTime;
-            let lastSent = 0;
+            let sendTimer = null;
             
             const ctrl = transferControlRef.current[`up-${fileId}`];
+            if (!ctrl) {
+                resolve();
+                return;
+            }
+
+            const cleanupChannelLoop = () => {
+                if (sendTimer) {
+                    clearTimeout(sendTimer);
+                    sendTimer = null;
+                }
+                if (dc.onbufferedamountlow === sendBatch) {
+                    dc.onbufferedamountlow = null;
+                }
+            };
+
+            const scheduleNextBurst = (delay = 0) => {
+                if (sendTimer) {
+                    return;
+                }
+
+                sendTimer = setTimeout(() => {
+                    sendTimer = null;
+                    sendBatch();
+                }, delay);
+            };
             
             // 发送文件元数据
             const meta = {
@@ -361,6 +459,18 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             if (dc.readyState === 'open') {
                 dc.send(JSON.stringify(meta));
             } else {
+                reportFileIssue('file_channel_not_open', {
+                    fileId,
+                    fileName,
+                    targetId,
+                    targetName,
+                    readyState: dc.readyState
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'file-send'
+                    }
+                });
                 reject(new Error('DataChannel not open'));
                 return;
             }
@@ -369,6 +479,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             setFileProgress(prev => ({
                 ...prev,
                 [`up-${fileId}-${targetId}`]: {
+                    controlKey: `up-${fileId}`,
                     type: 'upload',
                     name: fileName,
                     totalSize: formatSize(arrayBuffer.byteLength),
@@ -376,6 +487,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     percent: 0,
                     speed: '0 B/s',
                     remaining: 'calculating...',
+                    targetId,
                     targetName: targetName
                 }
             }));
@@ -386,14 +498,14 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             const sendBatch = () => {
                 // 检查控制对象是否还存在
                 if (!ctrl) {
-                    dc.onbufferedamountlow = null;
+                    cleanupChannelLoop();
                     resolve();
                     return;
                 }
                 
                 // 先检查是否取消（优先级最高）
                 if (ctrl.subCancelled[targetId]) {
-                    dc.onbufferedamountlow = null;
+                    cleanupChannelLoop();
                     resolve();
                     return;
                 }
@@ -403,17 +515,16 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     return; // 暂停中，等待恢复
                 }
                 
-                // 动态调整阈值 - 保持 4MB 缓冲区
-                const bufferThreshold = 4 * 1024 * 1024; // 4MB
-                if (totalChunksCount - chunkCount > 64) {
-                    dc.bufferedAmountLowThreshold = bufferThreshold;
-                } else {
-                    dc.bufferedAmountLowThreshold = 0;
-                }
-                
-                // 批量发送直到缓冲区满（最多 8MB）
-                const maxBufferedAmount = 8 * 1024 * 1024; // 8MB
-                while (chunkCount < totalChunksCount && dc.bufferedAmount < maxBufferedAmount) {
+                dc.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+
+                // 每个 burst 只发送有限分片，避免主线程长时间不让出执行权，
+                // 也避免一次性灌太多缓冲导致暂停按钮“看起来没反应”。
+                let sentInBurst = 0;
+                while (
+                    chunkCount < totalChunksCount &&
+                    dc.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+                    sentInBurst < MAX_CHUNKS_PER_BURST
+                ) {
                     const start = chunkCount * chunkSize;
                     const end = Math.min(start + chunkSize, arrayBuffer.byteLength);
                     const chunk = arrayBuffer.slice(start, end);
@@ -422,6 +533,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                         dc.send(chunk);
                         chunkCount++;
                         offset += chunk.byteLength;
+                        sentInBurst++;
                         
                         // 计算进度
                         const now = Date.now();
@@ -430,8 +542,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                         const speed = elapsed > 0 ? offset / elapsed : 0;
                         const remaining = speed > 0 ? (arrayBuffer.byteLength - offset) / speed : 0;
                         
-                        // 每 100ms 更新一次进度
-                        if (now - lastTime > 100 || chunkCount >= totalChunksCount) {
+                        if (now - lastTime > PROGRESS_UPDATE_INTERVAL || chunkCount >= totalChunksCount) {
                             lastTime = now;
                             setFileProgress(prev => {
                                 if (!prev[`up-${fileId}-${targetId}`]) return prev; // 已被取消
@@ -449,6 +560,20 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                         }
                     } catch (e) {
                         console.error('Send error:', e);
+                        reportFileIssue('file_chunk_send_failed', {
+                            fileId,
+                            fileName,
+                            targetId,
+                            targetName,
+                            message: e.message,
+                            name: e.name || 'Error'
+                        }, {
+                            delayMs: 1500,
+                            context: {
+                                feature: 'file-send'
+                            }
+                        });
+                        cleanupChannelLoop();
                         reject(e);
                         return;
                     }
@@ -461,7 +586,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 // 检查是否完成
                 if (chunkCount >= totalChunksCount) {
                     // 该目标传输完成
-                    dc.onbufferedamountlow = null;
+                    cleanupChannelLoop();
                     
                     // 发送完成消息
                     dc.send(JSON.stringify({
@@ -485,10 +610,24 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     }
                     
                     log(`Sent ${fileName} to ${targetName}`);
+                    recordFileEvent('file_target_send_completed', {
+                        fileId,
+                        fileName,
+                        targetId,
+                        targetName
+                    });
                     resolve();
                     return;
                 }
-                // 如果未完成，事件监听器会在缓冲区低于阈值时自动触发 sendBatch
+
+                if (ctrl.subPaused[targetId] || ctrl.subCancelled[targetId]) {
+                    return;
+                }
+
+                if (dc.bufferedAmount < BUFFER_LOW_THRESHOLD) {
+                    scheduleNextBurst(0);
+                }
+                // 如果缓冲区仍然偏高，则等待 bufferedamountlow 再触发下一轮
             };
             
             // 存储 sendBatch 函数供暂停/恢复使用
@@ -522,6 +661,14 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             fileHandle: null,
             writer: null
         };
+
+        recordFileEvent('file_receive_started', {
+            fileId: fileMeta.fileId,
+            fileName: fileMeta.name,
+            size: fileMeta.size,
+            fromUserId: remoteId,
+            mode: fileMeta.mode || 'broadcast'
+        });
         
         const fileId = fileMeta.fileId;
         transferControlRef.current[`down-${fileId}`] = {
@@ -590,6 +737,11 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 }
                 
                 log(`已取消接收: ${fileMeta.name}`);
+                recordFileEvent('file_receive_cancelled', {
+                    fileId,
+                    fileName: fileMeta.name,
+                    fromUserId: remoteId
+                });
             }
         };
         
@@ -638,6 +790,18 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 // 其他错误
                 console.error('FileSystem API error:', err.name, err.message, err);
                 log(`文件保存失败: ${err.message || '未知错误'}`);
+                reportFileIssue('file_save_picker_failed', {
+                    fileId,
+                    fileName: fileMeta.name,
+                    fromUserId: remoteId,
+                    message: err.message || '未知错误',
+                    name: err.name || 'Error'
+                }, {
+                    delayMs: 1500,
+                    context: {
+                        feature: 'file-receive'
+                    }
+                });
                 // 清理进度条
                 setFileProgress(prev => {
                     const next = { ...prev };
@@ -649,7 +813,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         }
         
         return true;
-    }, [log, peersRef, myId, setFileProgress]);
+    }, [log, peersRef, myId, setFileProgress, recordFileEvent, reportFileIssue]);
     
     return {
         fileProgress,

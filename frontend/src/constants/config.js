@@ -5,6 +5,42 @@ export const ICE_SERVERS = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
 
+export async function fetchSession() {
+    const response = await fetch('/api/session', {
+        credentials: 'include',
+        cache: 'no-store'
+    });
+
+    if (!response.ok) {
+        throw new Error(`Failed to initialize session: ${response.status}`);
+    }
+
+    return response.json();
+}
+
+export async function fetchIceConfig() {
+    try {
+        const response = await fetch('/api/ice', {
+            credentials: 'include'
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to fetch ICE config: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return {
+            provider: data.provider || 'default',
+            iceServers: Array.isArray(data.iceServers) && data.iceServers.length > 0
+                ? data.iceServers
+                : ICE_SERVERS.iceServers
+        };
+    } catch (error) {
+        console.warn('Falling back to default ICE servers:', error);
+        return ICE_SERVERS;
+    }
+}
+
 /**
  * WebSocket 配置
  */
@@ -20,10 +56,11 @@ export const WS_CONFIG = {
  * 文件传输配置
  */
 export const FILE_TRANSFER_CONFIG = {
-    CHUNK_SIZE: 16384,           // 16KB per chunk
-    BATCH_SIZE: 32,              // Send 32 chunks at once
-    BUFFER_THRESHOLD: 16,        // Buffer threshold for flow control
-    PROGRESS_UPDATE_INTERVAL: 100 // 100ms between progress updates
+    CHUNK_SIZE: 64 * 1024,                 // 64KB 分片，兼顾吞吐与兼容性
+    MAX_CHUNKS_PER_BURST: 8,               // 每次只发送小批次，给暂停/界面更新留机会
+    MAX_BUFFERED_AMOUNT: 512 * 1024,       // 最多预灌 512KB，避免暂停后还拖很久
+    BUFFER_LOW_THRESHOLD: 256 * 1024,      // 缓冲降到 256KB 后继续补数据
+    PROGRESS_UPDATE_INTERVAL: 100          // 100ms 更新一次进度
 };
 
 /**
