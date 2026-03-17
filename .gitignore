@@ -3,6 +3,8 @@ node_modules
 frontend/dist
 target
 diagnostics
+frontend/diagnostics
+.idea/
 patrick-im
 patrick-im.exe
 patrick-im-server

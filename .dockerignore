@@ -4,5 +4,14 @@
 node_modules
 frontend/node_modules
 frontend/dist
-target
+target/*
+!target/x86_64-unknown-linux-musl/
+target/x86_64-unknown-linux-musl/*
+!target/x86_64-unknown-linux-musl/release/
+target/x86_64-unknown-linux-musl/release/*
+!target/x86_64-unknown-linux-musl/release/patrick-im-server
 build
+diagnostics
+frontend/diagnostics
+.env
+.env.local

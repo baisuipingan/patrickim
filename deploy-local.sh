@@ -2,10 +2,11 @@
 
 # 本地一键发版脚本：
 # 1. 读取 .env 和 .env.local
-# 2. 登录阿里云镜像仓库
-# 3. 本地 buildx 构建并推送 linux/amd64 镜像
-# 4. 把部署文件和 .env 同步到服务器
-# 5. 服务器拉取新镜像并重启
+# 2. 本机构建前端静态资源
+# 3. 本机用 cargo-zigbuild 交叉编译 Linux 可执行文件
+# 4. 打包运行镜像并推送到阿里云镜像仓库
+# 5. 把部署文件和 .env 同步到服务器
+# 6. 服务器拉取新镜像并重启
 
 set -euo pipefail
 
@@ -28,11 +29,42 @@ load_env_file "$ROOT_DIR/.env.local"
 IMAGE_REPO="${IMAGE_REPO:-${APP_IMAGE%:*}}"
 ACR_REGISTRY="${ACR_REGISTRY:-${IMAGE_REPO%%/*}}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
-REMOTE_IMAGE_TAG="${REMOTE_IMAGE_TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64}"
 PUSH_LATEST="${PUSH_LATEST:-true}"
-BUILDER_NAME="${BUILDER_NAME:-patrick-im-builder}"
+RUST_TARGET="${RUST_TARGET:-}"
+CURRENT_CONTEXT="$(docker context show)"
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-no}"
+SERVER_BINARY=""
+
+infer_rust_target() {
+  case "$PLATFORMS" in
+    linux/amd64)
+      echo "x86_64-unknown-linux-musl"
+      ;;
+    linux/arm64)
+      echo "aarch64-unknown-linux-musl"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+if [ -z "$RUST_TARGET" ]; then
+  RUST_TARGET="$(infer_rust_target)"
+fi
+
+if [ -z "$RUST_TARGET" ]; then
+  echo "无法根据 PLATFORMS=$PLATFORMS 推断 Rust 目标，请在 .env.local 中显式设置 RUST_TARGET。"
+  exit 1
+fi
+
+if [[ "$PLATFORMS" == *,* ]]; then
+  echo "当前脚本只支持单平台发布，请把 PLATFORMS 设置成单个平台，例如 linux/amd64。"
+  exit 1
+fi
+
+SERVER_BINARY="target/$RUST_TARGET/release/patrick-im-server"
 
 missing=()
 for name in \
@@ -68,50 +100,85 @@ if command -v sshpass >/dev/null 2>&1; then
   SCP_CMD=(sshpass -p "$DEPLOY_SERVER_PASSWORD" scp "${SCP_OPTS[@]}")
 fi
 
+require_command() {
+  local name="$1"
+  if ! command -v "$name" >/dev/null 2>&1; then
+    echo "缺少命令：$name"
+    exit 1
+  fi
+}
+
+require_command docker
+require_command cargo
+require_command zig
+require_command npm
+
+if ! cargo zigbuild --help >/dev/null 2>&1; then
+  echo "缺少 cargo-zigbuild，请先执行：cargo install cargo-zigbuild"
+  exit 1
+fi
+
 echo "=========================================="
 echo "开始一键发版 patrick-im"
 echo "=========================================="
 echo "镜像仓库: $IMAGE_REPO"
 echo "服务器: $TARGET:$DEPLOY_PROJECT_DIR"
 echo "构建平台: $PLATFORMS"
+echo "Rust 目标: $RUST_TARGET"
 
 echo ""
-echo ">>> 步骤 1: 登录本地阿里云镜像仓库"
+echo ">>> 步骤 1: 构建前端产物"
+if [ ! -d "$ROOT_DIR/frontend/node_modules" ]; then
+  (
+    cd "$ROOT_DIR/frontend"
+    npm ci
+  )
+fi
+(
+  cd "$ROOT_DIR/frontend"
+  npm run build
+)
+
+echo ""
+echo ">>> 步骤 2: 交叉编译 Linux 可执行文件"
+cargo zigbuild --release --target "$RUST_TARGET"
+if [ ! -f "$SERVER_BINARY" ]; then
+  echo "未找到编译产物：$SERVER_BINARY"
+  exit 1
+fi
+
+echo ""
+echo ">>> 步骤 3: 登录本地阿里云镜像仓库"
 printf '%s' "$ACR_PASSWORD" | docker login --username="$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
 
 echo ""
-echo ">>> 步骤 2: 准备 buildx builder"
-if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
-  docker buildx create --name "$BUILDER_NAME" --driver docker-container --use
-else
-  docker buildx use "$BUILDER_NAME"
-fi
-docker buildx inspect --bootstrap >/dev/null
-
-echo ""
-echo ">>> 步骤 3: 构建并推送镜像"
-BUILD_ARGS=(
-  --platform "$PLATFORMS"
-  -t "${IMAGE_REPO}:${IMAGE_TAG}"
-)
+echo ">>> 步骤 4: 构建运行镜像"
+docker buildx use "$CURRENT_CONTEXT" >/dev/null 2>&1 || true
+BUILD_ARGS=(--platform "$PLATFORMS" --load -t "${IMAGE_REPO}:${IMAGE_TAG}")
 if [ "$PUSH_LATEST" = "true" ]; then
   BUILD_ARGS+=(-t "${IMAGE_REPO}:latest")
 fi
-docker buildx build "${BUILD_ARGS[@]}" --push .
+docker buildx build "${BUILD_ARGS[@]}" .
 
 echo ""
-echo ">>> 步骤 4: 准备服务器目录"
-"${SSH_CMD[@]}" "$TARGET" "mkdir -p '$DEPLOY_PROJECT_DIR/deploy/nginx'"
+echo ">>> 步骤 5: 推送镜像"
+docker push "${IMAGE_REPO}:${IMAGE_TAG}"
+if [ "$PUSH_LATEST" = "true" ]; then
+  docker push "${IMAGE_REPO}:latest"
+fi
 
 echo ""
-echo ">>> 步骤 5: 同步部署文件到服务器"
+echo ">>> 步骤 6: 准备服务器目录"
+"${SSH_CMD[@]}" "$TARGET" "mkdir -p '$DEPLOY_PROJECT_DIR'"
+
+echo ""
+echo ">>> 步骤 7: 同步部署文件到服务器"
 "${SCP_CMD[@]}" "$ROOT_DIR/.env" "$TARGET:$DEPLOY_PROJECT_DIR/.env"
 "${SCP_CMD[@]}" "$ROOT_DIR/docker-compose.yml" "$TARGET:$DEPLOY_PROJECT_DIR/docker-compose.yml"
 "${SCP_CMD[@]}" "$ROOT_DIR/deploy.sh" "$TARGET:$DEPLOY_PROJECT_DIR/deploy.sh"
-"${SCP_CMD[@]}" "$ROOT_DIR/deploy/nginx/nginx.conf" "$TARGET:$DEPLOY_PROJECT_DIR/deploy/nginx/nginx.conf"
 
 echo ""
-echo ">>> 步骤 6: 服务器登录镜像仓库并更新容器"
+echo ">>> 步骤 8: 服务器登录镜像仓库并更新容器"
 "${SSH_CMD[@]}" "$TARGET" /bin/bash <<EOF
 set -euo pipefail
 cd $(printf '%q' "$DEPLOY_PROJECT_DIR")

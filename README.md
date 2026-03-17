@@ -58,52 +58,36 @@
 - **WebRTC**: 核心 P2P 通信技术
 - **Tailwind CSS**: 原子化 CSS 样式
 - **shadcn/ui**: 高质量 UI 组件库
-- **CryptoJS**: 前端数据加密与哈希计算
 
 ## 🚀 快速开始
 
 ### 方式一：Docker Compose 部署（推荐）
 
-当前推荐使用 `Rust app + Nginx` 的双容器部署方式。
+当前推荐使用“`Rust app` 容器 + 服务器现有反向代理”的方式。服务器上的 Nginx/Caddy 只需要转发到 `127.0.0.1:3456`，构建全部在你本机完成。
 
 ```bash
-# 1. 准备环境变量
+# 1. 准备服务端运行配置
 cp .env.example .env
 
-# 2. 至少设置一个稳定的匿名会话密钥
-# SESSION_SECRET=请替换成一串足够长的随机字符串
+# 2. 准备本机私密发版配置
+cp .env.local.example .env.local
 
-# 3. 构建并启动
-docker compose up -d --build
-```
-
-默认通过 Nginx 暴露在 `http://localhost`。
-
-### 方式一补充：推荐的远程发布链路
-
-如果你的服务器是 `x86_64`，而开发机像 MacBook 一样是 `arm64`，推荐改成：
-
-1. 本地用 `docker buildx` 构建 `linux/amd64` 镜像并推送到镜像仓库
-2. 服务器只执行 `docker compose pull && docker compose up -d`
-
-仓库内已经提供了两个脚本：
-
-```bash
-# 只发布镜像，不连服务器
-IMAGE_REPO=your-acr-registry.example.com/your-namespace/patrick-im \
-bash ./release-image.sh
-
-# 发布镜像后，通过 SSH 让服务器拉新镜像并重启
-SERVER=ubuntu@1.2.3.4 \
-PROJECT_DIR=/home/patrick-im \
-IMAGE_REPO=your-acr-registry.example.com/your-namespace/patrick-im \
-bash ./deploy-remote.sh
+# 3. 每次发版只需要这一条
+bash ./deploy-local.sh
 ```
 
 说明：
-- 默认构建平台是 `linux/amd64`，适合大多数云服务器。
-- 这是 Docker 层的跨架构构建，不需要额外用 `zigbuild` 去交叉编译 Rust。
-- 如果以后你既有 `amd64` 服务器也有 `arm64` 服务器，可以把 `PLATFORMS` 改成 `linux/amd64,linux/arm64` 来发多架构镜像。
+- `.env` 只放服务端运行配置，例如 `APP_IMAGE`、`ALLOWED_ORIGINS`、`SESSION_SECRET`、ICE/TURN 配置。
+- `.env.local` 只放你本机发版需要的私密配置，例如 SSH 密码、阿里云镜像仓库账号密码。
+- `deploy-local.sh` 会先在本机构建前端，再用 `cargo zigbuild` 交叉编译 Linux 二进制，最后只打一个运行镜像推送到阿里云。
+- Docker Compose 只负责替换 `3456` 上的应用容器；`80/443` 继续由服务器已经存在的 Nginx/Caddy 接管。
+- `IMAGE_TAG` 留空时，脚本默认使用当前 git 提交短 SHA，同时额外推送一个 `latest` 标签，服务器侧通常直接拉 `latest`。
+- 首次使用请确保本机具备 `zig`、`cargo-zigbuild`，并执行过一次：
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo install cargo-zigbuild
+```
 
 ### 方式二：本地源码运行
 
@@ -128,29 +112,11 @@ cd ..
 cargo run
 ```
 
-如果你要调试音视频，还有两个常用方式：
-
-```bash
-# 桌面浏览器本机调试
-# localhost 在多数现代浏览器里本身就属于安全上下文
-# Vite 会把 /api 和 /ws 自动代理到本地 Rust 后端（默认 http://127.0.0.1:3456）
-cd frontend
-npm run dev
-
-# 局域网设备 / 本地 HTTPS 调试
-# 适合手机、平板或通过本机 IP 访问时测试摄像头和麦克风权限
-# 同样会自动代理到本地 Rust 后端
-cd frontend
-npm run dev:https
-```
-
 说明：
-- `cargo run` 现在会自动读取项目根目录下的 `.env.local` 和 `.env`；显式传入的 shell 环境变量优先级更高。
-- 启动前记得先在项目根目录运行 `cargo run`，本地开发代理默认把请求转给 `http://127.0.0.1:3456`。
-- 如果你的后端不是这个地址，可以设置环境变量 `VITE_DEV_BACKEND_ORIGIN`，例如 `VITE_DEV_BACKEND_ORIGIN=http://192.168.1.10:3456 npm run dev:https`。
-- `http://localhost` 或 `http://127.0.0.1` 在大多数桌面浏览器里可以直接调用 `getUserMedia`。
-- `http://192.168.x.x` 这类局域网 IP 通常不算安全上下文，测试音视频时建议用 `npm run dev:https`。
-- `dev:https` 基于 Vite 的本地 HTTPS 证书能力启动，浏览器首次访问可能需要手动确认一次证书。
+- `cargo run` 会自动读取项目根目录下的 `.env`；显式传入的 shell 环境变量优先级更高。
+- 生产发版用 `.env + .env.local`；本地开发通常只需要 `.env`。
+- `http://localhost` 或 `http://127.0.0.1` 在多数桌面浏览器里可以直接调用 `getUserMedia`。
+- 如果要做局域网 HTTPS 调试，建议自行在反向代理层处理证书，而不是依赖仓库内脚本。
 
 匿名会话说明：
 - `GET /api/session` 会由服务端签发匿名 Cookie，浏览器后续连接 `/ws` 时自动携带。
