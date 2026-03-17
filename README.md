@@ -90,13 +90,13 @@ docker compose up -d --build
 
 ```bash
 # 只发布镜像，不连服务器
-IMAGE_REPO=ccr.ccs.tencentyun.com/your-namespace/patrick-im \
+IMAGE_REPO=your-acr-registry.example.com/your-namespace/patrick-im \
 bash ./release-image.sh
 
 # 发布镜像后，通过 SSH 让服务器拉新镜像并重启
 SERVER=ubuntu@1.2.3.4 \
 PROJECT_DIR=/home/patrick-im \
-IMAGE_REPO=ccr.ccs.tencentyun.com/your-namespace/patrick-im \
+IMAGE_REPO=your-acr-registry.example.com/your-namespace/patrick-im \
 bash ./deploy-remote.sh
 ```
 

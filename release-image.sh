@@ -12,7 +12,7 @@ PUSH_LATEST="${PUSH_LATEST:-true}"
 BUILDER_NAME="${BUILDER_NAME:-patrick-im-builder}"
 
 if [ -z "$IMAGE_REPO" ]; then
-  echo "IMAGE_REPO 未设置，例如：ccr.ccs.tencentyun.com/your-namespace/patrick-im"
+  echo "IMAGE_REPO 未设置，例如：your-acr-registry.example.com/your-namespace/patrick-im"
   exit 1
 fi
 
