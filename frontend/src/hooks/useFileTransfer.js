@@ -47,6 +47,30 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             ...options
         });
     }, [diagnostics]);
+
+    const getPeerTransferChannels = useCallback((peer) => {
+        const controlDc = peer?.chatDc || peer?.dc || peer?.fileDc || null;
+        const dataDc = (peer?.fileDc && peer.fileDc.readyState === 'open')
+            ? peer.fileDc
+            : (peer?.dc || peer?.chatDc || peer?.fileDc || null);
+
+        return {
+            controlDc,
+            dataDc
+        };
+    }, []);
+
+    const sendJsonMessage = useCallback((channel, payload) => {
+        if (!channel || channel.readyState !== 'open') {
+            return false;
+        }
+        try {
+            channel.send(JSON.stringify(payload));
+            return true;
+        } catch {
+            return false;
+        }
+    }, []);
     
     /**
      * 发送文件
@@ -178,15 +202,17 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         
         const isPrivate = targetUser !== null;
         
-        // 获取目标的 DataChannel 和 ID
+        // 获取目标的通道。控制消息优先走 chat 通道，文件二进制优先走 file 通道。
         let targets;
         if (isPrivate) {
             // 私聊：只发送给指定用户
             const peer = peersRef.current[targetUser];
-            if (peer && peer.dc) {
+            const { controlDc, dataDc } = getPeerTransferChannels(peer);
+            if (peer && controlDc && dataDc) {
                 targets = [{
                     id: targetUser,
-                    dc: peer.dc,
+                    controlDc,
+                    dataDc,
                     name: getDisplayName(targetUser)
                 }];
             } else {
@@ -194,11 +220,20 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             }
         } else {
             // 广播：发送给所有在线用户
-            targets = Object.entries(peersRef.current).map(([id, peer]) => ({
-                id,
-                dc: peer.dc,
-                name: getDisplayName(id)
-            }));
+            targets = Object.entries(peersRef.current)
+                .map(([id, peer]) => {
+                    const { controlDc, dataDc } = getPeerTransferChannels(peer);
+                    if (!controlDc || !dataDc) {
+                        return null;
+                    }
+                    return {
+                        id,
+                        controlDc,
+                        dataDc,
+                        name: getDisplayName(id)
+                    };
+                })
+                .filter(Boolean);
         }
         
         if (targets.length === 0) {
@@ -224,6 +259,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             subPaused: {},
             subCancelled: {},
             subChannels: {},
+            subDataChannels: {},
             subSendBatch: {},
             pause: () => {
                 const ctrl = transferControlRef.current[`up-${fileId}`];
@@ -236,15 +272,13 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 
                 // 通知所有接收端暂停
                 Object.entries(ctrl.subChannels).forEach(([id, channel]) => {
-                    if (channel && channel.readyState === 'open') {
-                        try {
-                            channel.send(JSON.stringify({
-                                type: 'pause-transfer-by-sender',
-                                fileId: fileId
-                            }));
-                        } catch (e) {
-                            console.error('Failed to send pause signal:', e);
-                        }
+                    try {
+                        sendJsonMessage(channel, {
+                            type: 'pause-transfer-by-sender',
+                            fileId: fileId
+                        });
+                    } catch (e) {
+                        console.error('Failed to send pause signal:', e);
                     }
                 });
             },
@@ -259,15 +293,13 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 
                 // 通知所有接收端恢复
                 Object.entries(ctrl.subChannels).forEach(([id, channel]) => {
-                    if (channel && channel.readyState === 'open') {
-                        try {
-                            channel.send(JSON.stringify({
-                                type: 'resume-transfer-by-sender',
-                                fileId: fileId
-                            }));
-                        } catch (e) {
-                            console.error('Failed to send resume signal:', e);
-                        }
+                    try {
+                        sendJsonMessage(channel, {
+                            type: 'resume-transfer-by-sender',
+                            fileId: fileId
+                        });
+                    } catch (e) {
+                        console.error('Failed to send resume signal:', e);
                     }
                 });
                 
@@ -298,18 +330,17 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 
                 // 然后移除事件监听器和通知接收端
                 Object.entries(ctrl.subChannels).forEach(([id, channel]) => {
-                    if (channel) {
-                        channel.onbufferedamountlow = null;
-                        if (channel.readyState === 'open') {
-                            try {
-                                channel.send(JSON.stringify({
-                                    type: 'cancel-transfer',
-                                    fileId: fileId
-                                }));
-                            } catch (e) {
-                                console.error('Failed to send cancel signal:', e);
-                            }
-                        }
+                    const dataChannel = ctrl.subDataChannels[id];
+                    if (dataChannel) {
+                        dataChannel.onbufferedamountlow = null;
+                    }
+                    try {
+                        sendJsonMessage(channel, {
+                            type: 'cancel-transfer',
+                            fileId: fileId
+                        });
+                    } catch (e) {
+                        console.error('Failed to send cancel signal:', e);
                     }
                 });
                 
@@ -338,10 +369,12 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         const promises = targets.map(target => {
             control.subPaused[target.id] = false;
             control.subCancelled[target.id] = false;
-            control.subChannels[target.id] = target.dc;
+            control.subChannels[target.id] = target.controlDc;
+            control.subDataChannels[target.id] = target.dataDc;
             
             return sendFileToChannel(
-                target.dc,
+                target.dataDc,
+                target.controlDc,
                 arrayBuffer,
                 fileId,
                 target.id,
@@ -406,12 +439,12 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             size: file.size,
             targetCount: targets.length
         });
-    }, [log, peersRef, getDisplayName, addChat, blobUrlsRef, setFileProgress, recordFileEvent, reportFileIssue]);
+    }, [addChat, blobUrlsRef, getDisplayName, getPeerTransferChannels, log, peersRef, recordFileEvent, reportFileIssue, sendJsonMessage, setFileProgress]);
     
     /**
      * 向单个 Channel 发送文件
      */
-    const sendFileToChannel = useCallback((dc, arrayBuffer, fileId, targetId, fileName, totalChunks, chunkSize, targetName, fileType, isPrivate) => {
+    const sendFileToChannel = useCallback((dataDc, controlDc, arrayBuffer, fileId, targetId, fileName, totalChunks, chunkSize, targetName, fileType, isPrivate) => {
         return new Promise((resolve, reject) => {
             let offset = 0;
             const startTime = Date.now();
@@ -429,8 +462,8 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     clearTimeout(sendTimer);
                     sendTimer = null;
                 }
-                if (dc.onbufferedamountlow === sendBatch) {
-                    dc.onbufferedamountlow = null;
+                if (dataDc.onbufferedamountlow === sendBatch) {
+                    dataDc.onbufferedamountlow = null;
                 }
             };
 
@@ -456,22 +489,54 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 totalChunks
             };
             
-            if (dc.readyState === 'open') {
-                dc.send(JSON.stringify(meta));
-            } else {
+            if (!controlDc || controlDc.readyState !== 'open') {
                 reportFileIssue('file_channel_not_open', {
                     fileId,
                     fileName,
                     targetId,
                     targetName,
-                    readyState: dc.readyState
+                    readyState: controlDc?.readyState || 'missing'
                 }, {
                     delayMs: 1000,
                     context: {
                         feature: 'file-send'
                     }
                 });
-                reject(new Error('DataChannel not open'));
+                reject(new Error('Control DataChannel not open'));
+                return;
+            }
+
+            if (!dataDc || dataDc.readyState !== 'open') {
+                reportFileIssue('file_data_channel_not_open', {
+                    fileId,
+                    fileName,
+                    targetId,
+                    targetName,
+                    readyState: dataDc?.readyState || 'missing'
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'file-send'
+                    }
+                });
+                reject(new Error('File DataChannel not open'));
+                return;
+            }
+
+            const metaSent = sendJsonMessage(dataDc, meta);
+            if (!metaSent) {
+                reportFileIssue('file_start_signal_failed', {
+                    fileId,
+                    fileName,
+                    targetId,
+                    targetName
+                }, {
+                    delayMs: 1000,
+                    context: {
+                        feature: 'file-send'
+                    }
+                });
+                reject(new Error('Failed to send file-start control message'));
                 return;
             }
             
@@ -515,14 +580,14 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     return; // 暂停中，等待恢复
                 }
                 
-                dc.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+                dataDc.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
 
                 // 每个 burst 只发送有限分片，避免主线程长时间不让出执行权，
                 // 也避免一次性灌太多缓冲导致暂停按钮“看起来没反应”。
                 let sentInBurst = 0;
                 while (
                     chunkCount < totalChunksCount &&
-                    dc.bufferedAmount < MAX_BUFFERED_AMOUNT &&
+                    dataDc.bufferedAmount < MAX_BUFFERED_AMOUNT &&
                     sentInBurst < MAX_CHUNKS_PER_BURST
                 ) {
                     const start = chunkCount * chunkSize;
@@ -530,7 +595,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     const chunk = arrayBuffer.slice(start, end);
                     
                     try {
-                        dc.send(chunk);
+                        dataDc.send(chunk);
                         chunkCount++;
                         offset += chunk.byteLength;
                         sentInBurst++;
@@ -589,10 +654,25 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     cleanupChannelLoop();
                     
                     // 发送完成消息
-                    dc.send(JSON.stringify({
+                    const sent = sendJsonMessage(dataDc, {
                         type: 'file-done',
                         fileId
-                    }));
+                    });
+                    if (!sent) {
+                        reportFileIssue('file_done_signal_failed', {
+                            fileId,
+                            fileName,
+                            targetId,
+                            targetName
+                        }, {
+                            delayMs: 1000,
+                            context: {
+                                feature: 'file-send'
+                            }
+                        });
+                        reject(new Error('Failed to send file-done control message'));
+                        return;
+                    }
                     
                     // 删除该目标的进度条
                     setFileProgress(prev => {
@@ -606,6 +686,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                         delete ctrl.subPaused[targetId];
                         delete ctrl.subCancelled[targetId];
                         delete ctrl.subChannels[targetId];
+                        delete ctrl.subDataChannels[targetId];
                         delete ctrl.subSendBatch[targetId];
                     }
                     
@@ -624,7 +705,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                     return;
                 }
 
-                if (dc.bufferedAmount < BUFFER_LOW_THRESHOLD) {
+                if (dataDc.bufferedAmount < BUFFER_LOW_THRESHOLD) {
                     scheduleNextBurst(0);
                 }
                 // 如果缓冲区仍然偏高，则等待 bufferedamountlow 再触发下一轮
@@ -634,12 +715,12 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
             ctrl.subSendBatch[targetId] = sendBatch;
             
             // 设置事件监听器（只设置一次）
-            dc.onbufferedamountlow = sendBatch;
+            dataDc.onbufferedamountlow = sendBatch;
             
             // 立即开始发送
             sendBatch();
         });
-    }, [log]);
+    }, [log, recordFileEvent, reportFileIssue, sendJsonMessage, setFileProgress]);
     
     /**
      * 初始化文件接收
@@ -679,9 +760,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 if (ctrl) {
                     ctrl.paused = true;
                     const peer = peersRef.current[remoteId];
-                    if (peer?.dc && peer.dc.readyState === 'open') {
+                    const { controlDc } = getPeerTransferChannels(peer);
+                    if (controlDc && controlDc.readyState === 'open') {
                         try {
-                            peer.dc.send(JSON.stringify({
+                            controlDc.send(JSON.stringify({
                                 type: 'pause-transfer-by-receiver',
                                 fileId: fileId,
                                 receiverId: myId
@@ -697,9 +779,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 if (ctrl) {
                     ctrl.paused = false;
                     const peer = peersRef.current[remoteId];
-                    if (peer?.dc && peer.dc.readyState === 'open') {
+                    const { controlDc } = getPeerTransferChannels(peer);
+                    if (controlDc && controlDc.readyState === 'open') {
                         try {
-                            peer.dc.send(JSON.stringify({
+                            controlDc.send(JSON.stringify({
                                 type: 'resume-transfer-by-receiver',
                                 fileId: fileId,
                                 receiverId: myId
@@ -724,9 +807,10 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
                 delete transferControlRef.current[`down-${fileId}`];
                 
                 const peer = peersRef.current[remoteId];
-                if (peer?.dc && peer.dc.readyState === 'open') {
+                const { controlDc } = getPeerTransferChannels(peer);
+                if (controlDc && controlDc.readyState === 'open') {
                     try {
-                        peer.dc.send(JSON.stringify({
+                        controlDc.send(JSON.stringify({
                             type: 'cancel-transfer-by-receiver',
                             fileId: fileId,
                             receiverId: myId
@@ -813,7 +897,7 @@ export function useFileTransfer({ log, addChat, peersRef, myId, getDisplayName, 
         }
         
         return true;
-    }, [log, peersRef, myId, setFileProgress, recordFileEvent, reportFileIssue]);
+    }, [getDisplayName, getPeerTransferChannels, log, myId, peersRef, recordFileEvent, reportFileIssue, setFileProgress]);
     
     return {
         fileProgress,

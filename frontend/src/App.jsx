@@ -108,7 +108,7 @@ function ChatApp() {
         windowStartedAt: 0
     });
     
-    const peersRef = useRef({}); // id -> {pc, dc}
+    const peersRef = useRef({}); // id -> { pc, dc, chatDc, fileDc }
     const peerInstanceCounterRef = useRef(0);
     const eventQueueRef = useRef({}); // remoteId -> EventQueue
     const connectionTimeoutRef = useRef({}); // remoteId -> timeout handle
@@ -635,6 +635,44 @@ function ChatApp() {
         return peersRef.current[remoteId]?.instanceId === instanceId;
     }, []);
 
+    const getPeerChatChannel = useCallback((peer) => {
+        return peer?.chatDc || peer?.dc || null;
+    }, []);
+
+    const closePeerDataChannels = useCallback((peer) => {
+        const uniqueChannels = Array.from(new Set([peer?.chatDc, peer?.fileDc, peer?.dc].filter(Boolean)));
+        uniqueChannels.forEach((channel) => {
+            channel.onopen = null;
+            channel.onclose = null;
+            channel.onerror = null;
+            channel.onmessage = null;
+            channel.onbufferedamountlow = null;
+            try {
+                channel.close();
+            } catch {
+                // 忽略已经关闭的 DataChannel。
+            }
+        });
+    }, []);
+
+    const ensurePeerEventQueues = useCallback((remoteId) => {
+        if (!eventQueueRef.current[remoteId]) {
+            eventQueueRef.current[remoteId] = {
+                chat: createEventQueue(),
+                file: createEventQueue()
+            };
+        } else {
+            if (!eventQueueRef.current[remoteId].chat) {
+                eventQueueRef.current[remoteId].chat = createEventQueue();
+            }
+            if (!eventQueueRef.current[remoteId].file) {
+                eventQueueRef.current[remoteId].file = createEventQueue();
+            }
+        }
+
+        return eventQueueRef.current[remoteId];
+    }, []);
+
     const cleanupPeerConnection = useCallback((remoteId, { removeStatus = true } = {}) => {
         const peer = peersRef.current[remoteId];
 
@@ -647,17 +685,7 @@ function ChatApp() {
             clearTimeout(peer.iceRestartTimer);
         }
 
-        if (peer?.dc) {
-            peer.dc.onopen = null;
-            peer.dc.onclose = null;
-            peer.dc.onerror = null;
-            peer.dc.onmessage = null;
-            try {
-                peer.dc.close();
-            } catch {
-                // 忽略已经关闭的 DataChannel。
-            }
-        }
+        closePeerDataChannels(peer);
 
         if (peer?.pc) {
             peer.pc.ondatachannel = null;
@@ -691,7 +719,7 @@ function ChatApp() {
             lastHeartbeatSentAt: 0,
             staleSince: 0
         });
-    }, [incomingFilesRef, removePeerConnectionStatus, updatePeerConnectionStatus]);
+    }, [closePeerDataChannels, incomingFilesRef, removePeerConnectionStatus, updatePeerConnectionStatus]);
 
     const queuePendingIceCandidate = useCallback((remoteId, candidate) => {
         if (!remoteId || !candidate) {
@@ -919,7 +947,7 @@ function ChatApp() {
             if (peer.iceRestartTimer) {
                 clearTimeout(peer.iceRestartTimer);
             }
-            if (peer.dc) peer.dc.close();
+            closePeerDataChannels(peer);
             if (peer.pc) peer.pc.close();
             delete pendingIceCandidatesRef.current[remoteId];
         });
@@ -938,7 +966,7 @@ function ChatApp() {
             const now = Date.now();
 
             Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
-                const channel = peer?.dc;
+                const channel = getPeerChatChannel(peer);
                 if (!channel || channel.readyState !== 'open') {
                     return;
                 }
@@ -970,7 +998,7 @@ function ChatApp() {
             const now = Date.now();
 
             Object.entries(peersRef.current).forEach(([remoteId, peer]) => {
-                const channel = peer?.dc;
+                const channel = getPeerChatChannel(peer);
                 if (!channel || channel.readyState !== 'open') {
                     return;
                 }
@@ -1002,7 +1030,7 @@ function ChatApp() {
             clearInterval(heartbeatTimer);
             clearInterval(staleSweepTimer);
         };
-    }, [diagnostics, updatePeerConnectionStatus]);
+    }, [diagnostics, getPeerChatChannel, updatePeerConnectionStatus]);
 
     useEffect(() => {
         let isMounted = true;
@@ -1580,7 +1608,8 @@ function ChatApp() {
             }
 
             const peer = peersRef.current[remoteId];
-            if (peer && (!peer.dc || peer.dc.readyState !== 'open')) {
+            const chatChannel = getPeerChatChannel(peer);
+            if (peer && (!chatChannel || chatChannel.readyState !== 'open')) {
                 log(`Connection timeout with ${remoteId}, retrying...`);
                 diagnostics.reportIssue('peer_connection_timeout', {
                     remoteId,
@@ -1607,12 +1636,13 @@ function ChatApp() {
         }, 30000); // 30秒超时
 
         const pc = new RTCPeerConnection(rtcConfig);
-        let dc;
 
         peersRef.current[remoteId] = {
             instanceId,
             pc,
             dc: null,
+            chatDc: null,
+            fileDc: null,
             isInitiator: initiator,
             iceRestartTimer: null,
             iceRestartInFlight: false,
@@ -1622,13 +1652,18 @@ function ChatApp() {
         };
 
         if (initiator) {
-            // 配置 DataChannel 以优化大文件传输
-            dc = pc.createDataChannel("chat", {
-                ordered: true,  // 保证顺序，文件传输需要
-                maxRetransmits: undefined  // 可靠传输
+            const chatDc = pc.createDataChannel("chat", {
+                ordered: true
             });
-            peersRef.current[remoteId].dc = dc;
-            setupDataChannel(dc, remoteId, instanceId);
+            const fileDc = pc.createDataChannel("file", {
+                ordered: true,
+                maxRetransmits: undefined
+            });
+            peersRef.current[remoteId].dc = chatDc;
+            peersRef.current[remoteId].chatDc = chatDc;
+            peersRef.current[remoteId].fileDc = fileDc;
+            setupDataChannel(chatDc, remoteId, instanceId, 'chat');
+            setupDataChannel(fileDc, remoteId, instanceId, 'file');
         } else {
             pc.ondatachannel = (e) => {
                 if (!isActivePeerInstance(remoteId, instanceId)) {
@@ -1639,7 +1674,7 @@ function ChatApp() {
                     }
                     return;
                 }
-                setupDataChannel(e.channel, remoteId, instanceId);
+                setupDataChannel(e.channel, remoteId, instanceId, e.channel.label || 'chat');
             };
         }
         
@@ -1810,13 +1845,19 @@ function ChatApp() {
         }
     };
 
-    const setupDataChannel = (dc, remoteId, instanceId) => {
+    const setupDataChannel = (dc, remoteId, instanceId, channelLabel = 'chat') => {
         if (!isActivePeerInstance(remoteId, instanceId)) {
             return;
         }
 
+        const lane = channelLabel === 'file' ? 'file' : 'chat';
         if (peersRef.current[remoteId]) {
-            peersRef.current[remoteId].dc = dc;
+            if (lane === 'file') {
+                peersRef.current[remoteId].fileDc = dc;
+            } else {
+                peersRef.current[remoteId].chatDc = dc;
+                peersRef.current[remoteId].dc = dc;
+            }
         }
         
         // 重要：设置为 arraybuffer 以便接收二进制数据
@@ -1825,6 +1866,13 @@ function ChatApp() {
 
         dc.onopen = () => {
             if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
+            if (lane === 'file') {
+                log(`File channel ready with ${remoteId}`);
+                diagnostics.recordEvent('file_datachannel_opened', {
+                    remoteId
+                });
                 return;
             }
             log(`Connected to ${remoteId}`);
@@ -1848,6 +1896,25 @@ function ChatApp() {
         
         dc.onclose = () => {
             if (!isActivePeerInstance(remoteId, instanceId)) {
+                return;
+            }
+            if (peersRef.current[remoteId]) {
+                if (lane === 'file' && peersRef.current[remoteId].fileDc === dc) {
+                    peersRef.current[remoteId].fileDc = null;
+                }
+                if (lane === 'chat' && peersRef.current[remoteId].chatDc === dc) {
+                    peersRef.current[remoteId].chatDc = null;
+                    peersRef.current[remoteId].dc = null;
+                }
+            }
+            if (lane === 'file') {
+                log(`File channel closed with ${remoteId}`);
+                diagnostics.recordEvent('file_datachannel_closed', {
+                    remoteId
+                }, {
+                    delayMs: 1000,
+                    reason: 'file_datachannel_closed'
+                });
                 return;
             }
             log(`DataChannel closed with ${remoteId}`);
@@ -1878,10 +1945,11 @@ function ChatApp() {
             // DataChannel 错误通常是连接断开或关闭时的正常现象
             // 只有在 DataChannel 处于 open 状态时才是真正的错误
             if (dc.readyState === 'open' || dc.readyState === 'connecting') {
-                console.warn(`DataChannel error with ${remoteId}:`, error);
+                console.warn(`${lane === 'file' ? 'File' : 'Chat'} DataChannel error with ${remoteId}:`, error);
                 log(`⚠️ Connection issue with ${remoteId}`);
                 diagnostics.reportIssue('datachannel_error', {
                     remoteId,
+                    channelLabel: lane,
                     readyState: dc.readyState,
                     message: error?.message || 'DataChannel error'
                 }, {
@@ -1894,17 +1962,14 @@ function ChatApp() {
             // readyState 为 'closing' 或 'closed' 时是正常清理，忽略
         };
         
-        // 创建事件队列保证接收顺序
-        if (!eventQueueRef.current[remoteId]) {
-            eventQueueRef.current[remoteId] = createEventQueue();
-        }
+        // 为聊天/文件通道分别维护顺序队列，避免大文件把控制消息堵住。
+        const peerQueues = ensurePeerEventQueues(remoteId);
         
         dc.onmessage = (e) => {
             if (!isActivePeerInstance(remoteId, instanceId)) {
                 return;
             }
-            // 添加到事件队列，保证顺序处理
-            eventQueueRef.current[remoteId].enqueue(() => handleMessage(remoteId, e.data));
+            peerQueues[lane].enqueue(() => handleMessage(remoteId, e.data, { channelLabel: lane }));
         };
     };
     
@@ -1929,10 +1994,10 @@ function ChatApp() {
         };
     };
     
-    const handleMessage = async (remoteId, data) => {
+    const handleMessage = async (remoteId, data, { channelLabel = 'chat' } = {}) => {
         // 1. 处理二进制 chunk
         if (data instanceof ArrayBuffer) {
-            markPeerChannelAlive(remoteId, 'binary_chunk');
+            markPeerChannelAlive(remoteId, `${channelLabel}_binary_chunk`);
             handleBinaryChunk(remoteId, data);
             return;
         }
@@ -1945,7 +2010,7 @@ function ChatApp() {
                 return;
             }
 
-            markPeerChannelAlive(remoteId, 'datachannel_message');
+            markPeerChannelAlive(remoteId, `${channelLabel}_message`);
             if (msg.type === 'cancel-transfer') {
                 // 发送端主动取消，通知接收端
                 const control = transferControlRef.current[`down-${msg.fileId}`];
@@ -2021,7 +2086,7 @@ function ChatApp() {
                     if (allCancelled) {
                         log(`所有接收端都已取消，停止发送`);
                         // 移除所有事件监听器
-                        Object.values(control.subChannels).forEach(channel => {
+                        Object.values(control.subDataChannels || {}).forEach(channel => {
                             if (channel) channel.onbufferedamountlow = null;
                         });
                         // 清理控制对象
@@ -2079,7 +2144,8 @@ function ChatApp() {
             }
         } catch {
             diagnostics.recordEvent('datachannel_text_fallback', {
-                remoteId
+                remoteId,
+                channelLabel
             });
             markPeerChannelAlive(remoteId, 'text_fallback');
             addChat({ from: remoteId, text: data, type: 'text', mode: 'broadcast' });
@@ -2223,7 +2289,7 @@ function ChatApp() {
             
             if (isPrivate) {
                 // Private Chat - 检查用户是否在线
-                const { dc } = peersRef.current[activeUser] || {};
+                const dc = getPeerChatChannel(peersRef.current[activeUser]);
                 const status = connectionStatus[activeUser]?.status;
                 
                 if (!dc || dc.readyState !== 'open') {
@@ -2255,7 +2321,7 @@ function ChatApp() {
             } else {
                 // Global Chat
                 const activePeers = Object.keys(peersRef.current).filter(id => {
-                    const { dc } = peersRef.current[id];
+                    const dc = getPeerChatChannel(peersRef.current[id]);
                     return dc && dc.readyState === 'open';
                 });
                 
@@ -2287,7 +2353,7 @@ function ChatApp() {
                 }
                 
                 activePeers.forEach(id => {
-                    peersRef.current[id].dc.send(JSON.stringify(msgObj));
+                    getPeerChatChannel(peersRef.current[id])?.send(JSON.stringify(msgObj));
                 });
                 addChat({ from: 'Me', ...msgObj });
             }
@@ -2887,7 +2953,7 @@ function ChatApp() {
                                                 try {
                                                     channel.send(JSON.stringify({
                                                         type: 'cancel-transfer',
-                                                        fileId: parts[1]
+                                                        fileId: controlKey.replace(/^up-/, '')
                                                     }));
                                                 } catch (e) {
                                                     console.error('Failed to send cancel signal:', e);
@@ -2907,7 +2973,7 @@ function ChatApp() {
                                             );
                                             if (allCancelled) {
                                                 log(`所有接收端都已取消`);
-                                                delete transferControlRef.current[fileId];
+                                                delete transferControlRef.current[controlKey];
                                                 
                                                 // 重置发送标志，允许发送新文件
                                                 isSendingFileRef.current = false;
