@@ -1,7 +1,13 @@
 //! 环境变量解析与服务端运行配置。
 
-use std::{env, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+    sync::Arc,
+};
 
+use axum::http::{header, HeaderMap};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -146,5 +152,89 @@ impl AppConfig {
                     .any(|allowed| allowed.eq_ignore_ascii_case(value))
             })
             .unwrap_or(false)
+    }
+
+    /// 优先按白名单校验来源；若请求本身就是同源访问，也允许通过。
+    pub(crate) fn request_origin_allowed(&self, headers: &HeaderMap) -> bool {
+        if self.allowed_origins.is_empty() {
+            return true;
+        }
+
+        let origin = headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok());
+
+        if self.origin_allowed(origin) {
+            return true;
+        }
+
+        let Some(origin_authority) = origin.and_then(extract_origin_authority) else {
+            return false;
+        };
+        let host = headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok());
+        let Some(host) = host.map(str::trim).filter(|value| !value.is_empty()) else {
+            return false;
+        };
+
+        origin_authority.eq_ignore_ascii_case(host) && authority_is_local_dev(host)
+    }
+}
+
+fn extract_origin_authority(origin: &str) -> Option<&str> {
+    let (_, remainder) = origin.split_once("://")?;
+    let authority = remainder.split('/').next()?.trim();
+    (!authority.is_empty()).then_some(authority)
+}
+
+fn authority_is_local_dev(authority: &str) -> bool {
+    let host = authority_to_host(authority);
+    let normalized = host.trim().trim_matches('[').trim_matches(']');
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let lowered = normalized.to_ascii_lowercase();
+    if lowered == "localhost" || lowered.ends_with(".local") {
+        return true;
+    }
+
+    normalized
+        .parse::<IpAddr>()
+        .map(is_local_dev_ip)
+        .unwrap_or(false)
+}
+
+fn authority_to_host(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some(index) = rest.find(']') {
+            return &rest[..index];
+        }
+        return authority;
+    }
+
+    authority.rsplit_once(':')
+        .map(|(host, port)| {
+            if port.chars().all(|ch| ch.is_ascii_digit()) && !host.is_empty() {
+                host
+            } else {
+                authority
+            }
+        })
+        .unwrap_or(authority)
+}
+
+fn is_local_dev_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            ipv4.is_private()
+                || ipv4.is_loopback()
+                || ipv4.is_link_local()
+                || ipv4 == Ipv4Addr::new(0, 0, 0, 0)
+        }
+        IpAddr::V6(ipv6) => {
+            ipv6.is_loopback() || ipv6.is_unique_local() || ipv6.is_unicast_link_local()
+        }
     }
 }

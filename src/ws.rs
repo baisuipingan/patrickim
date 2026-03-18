@@ -50,7 +50,7 @@ pub(crate) async fn ws_handler(
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
 
-    if !context.config.origin_allowed(origin) {
+    if !context.config.request_origin_allowed(&headers) {
         warn!("rejecting websocket upgrade from origin {:?}", origin);
         return Err(StatusCode::FORBIDDEN);
     }

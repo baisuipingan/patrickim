@@ -14,7 +14,11 @@ export const isImageFile = (fileName, fileType) => {
  * @returns {boolean} 是否支持
  */
 export const isModernFileAPISupported = () => {
-    return 'showSaveFilePicker' in window && 'FileSystemHandle' in window;
+    return Boolean(
+        window.isSecureContext &&
+        'showSaveFilePicker' in window &&
+        'FileSystemHandle' in window
+    );
 };
 
 /**
