@@ -21,6 +21,7 @@ const PEER_STALE_THRESHOLD_MS = 60_000;
 const PEER_STALE_SWEEP_INTERVAL_MS = 5_000;
 const WS_CLOSE_REPORT_WINDOW_MS = 20_000;
 const WS_CLOSE_REPORT_THRESHOLD = 2;
+const WS_RECONNECT_DELAY_MS = 3_000;
 
 function createEventQueue(diagnostics) {
     let tail = Promise.resolve();
@@ -86,6 +87,7 @@ export function usePeerRuntime({
     const [wsStatus, setWsStatus] = useState(WS_STATUS.DISCONNECTED);
 
     const wsRef = useRef(null);
+    const lastWsUrlRef = useRef('');
     const reconnectTimeoutRef = useRef(null);
     const isManualCloseRef = useRef(false);
     const wsCloseBurstRef = useRef({
@@ -1239,6 +1241,8 @@ export function usePeerRuntime({
             reconnectTimeoutRef.current = null;
         }
 
+        lastWsUrlRef.current = url;
+
         if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
             isManualCloseRef.current = true;
             wsRef.current.close();
@@ -1250,6 +1254,10 @@ export function usePeerRuntime({
         isManualCloseRef.current = false;
 
         ws.onopen = () => {
+            if (wsRef.current !== ws) {
+                return;
+            }
+
             log('Connected to Signaling Server');
             reconnectTimeoutRef.current = null;
             setWsStatus(WS_STATUS.CONNECTED);
@@ -1259,6 +1267,10 @@ export function usePeerRuntime({
         };
 
         ws.onmessage = async (event) => {
+            if (wsRef.current !== ws) {
+                return;
+            }
+
             try {
                 const msg = JSON.parse(event.data);
                 await handleSignalMessage(msg);
@@ -1276,6 +1288,10 @@ export function usePeerRuntime({
         };
 
         ws.onerror = (error) => {
+            if (wsRef.current !== ws) {
+                return;
+            }
+
             console.error('WebSocket error:', error);
             diagnostics.reportIssue('ws_error', {
                 url,
@@ -1289,6 +1305,12 @@ export function usePeerRuntime({
         };
 
         ws.onclose = (event) => {
+            if (wsRef.current !== ws) {
+                return;
+            }
+
+            wsRef.current = null;
+
             const closeData = {
                 url,
                 code: event.code,
@@ -1336,7 +1358,7 @@ export function usePeerRuntime({
                 setWsStatus(WS_STATUS.RECONNECTING);
                 log('Connection lost. Reconnecting in 3 seconds...');
                 reconnectTimeoutRef.current = setTimeout(() => {
-                    if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+                    if (!isManualCloseRef.current && (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED)) {
                         void (async () => {
                             try {
                                 await refreshAnonymousSession({
@@ -1350,13 +1372,48 @@ export function usePeerRuntime({
                             connectWs(url, { isReconnect: true });
                         })();
                     }
-                }, 3000);
+                }, WS_RECONNECT_DELAY_MS);
             } else {
                 setWsStatus(WS_STATUS.DISCONNECTED);
                 log('Disconnected from server');
             }
         };
     }, [diagnostics, handleSignalMessage, log, refreshAnonymousSession]);
+
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.hidden || isManualCloseRef.current || !lastWsUrlRef.current) {
+                return;
+            }
+
+            const currentWs = wsRef.current;
+            if (currentWs && [WebSocket.CONNECTING, WebSocket.OPEN].includes(currentWs.readyState)) {
+                return;
+            }
+
+            setWsStatus(WS_STATUS.RECONNECTING);
+            log('Page became visible. Restoring signaling connection...');
+
+            void (async () => {
+                try {
+                    await refreshAnonymousSession({
+                        quiet: true,
+                        reason: 'ws_visibility_reconnect'
+                    });
+                } catch {
+                    // 后端如果此时还没起来，继续按原来的重连节奏尝试即可。
+                }
+
+                connectWs(lastWsUrlRef.current, { isReconnect: true });
+            })();
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [connectWs, log, refreshAnonymousSession]);
 
     const cleanupConnections = useCallback(() => {
         if (reconnectTimeoutRef.current) {
@@ -1365,6 +1422,7 @@ export function usePeerRuntime({
         }
 
         isManualCloseRef.current = true;
+        lastWsUrlRef.current = '';
 
         if (wsRef.current) {
             wsRef.current.close();
