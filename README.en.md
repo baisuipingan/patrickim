@@ -1,6 +1,6 @@
 # patrick-im
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.en.md) | [简体中文](./README.zh-CN.md)
 
 `patrick-im` is a WebRTC-first peer-to-peer communication app with anonymous room entry, text chat, file transfer, audio/video calling, and screen sharing. The current `main` branch is built with `Rust + Axum + React`. The server is intentionally lightweight and is only responsible for anonymous session issuance, signaling, ICE/TURN configuration, and diagnostics ingestion.
 
