@@ -1,93 +1,93 @@
 # patrick-im
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.en.md) | [简体中文](./README.md)
 
-`patrick-im` is a WebRTC-first peer-to-peer communication app with anonymous room entry, text chat, file transfer, audio/video calling, and screen sharing. The current `main` branch is built with `Rust + Axum + React`. The server is intentionally lightweight and is only responsible for anonymous session issuance, signaling, ICE/TURN configuration, and diagnostics ingestion.
+`patrick-im` 是一个以 WebRTC 为核心的点对点通信项目，支持匿名入房、文本聊天、文件传输、音视频通话与屏幕共享。当前主分支基于 `Rust + Axum + React`，服务端保持轻量，只负责匿名 session、房间信令、ICE/TURN 配置和诊断上报。
 
-## Status
+## 当前状态
 
-- Current mainline: Rust signaling server on `main`
-- Legacy Go version: `main-go` branch
-- Last Go snapshot: `go-legacy-final` tag
+- 当前主线：Rust 信令服务版本 `main`
+- 旧版 Go 实现：`main-go` 分支
+- Go 版本最后快照：`go-legacy-final` tag
 
-If you are coming from the older Go implementation, use `main-go` for historical reference and `main` for the actively maintained version.
+如果你是从早期 Go 版仓库迁移过来的，建议把 `main-go` 当作历史参考，把 `main` 当作当前维护版本。
 
-## Features
+## 核心特性
 
-- Anonymous room join with no account registration
-- P2P text chat over WebRTC DataChannel
-- File transfer with receiver-side acceptance, pause, resume, and cancel
-- Audio/video calling with camera and microphone toggles
-- Screen sharing during active calls
-- LAN-first connectivity with STUN / TURN fallback for public networks
-- Frontend and backend diagnostics for troubleshooting unstable sessions
-- Local-first chat history stored in the browser
+- 匿名入站，无需注册登录
+- 基于 WebRTC DataChannel 的 P2P 文本聊天
+- 接收方确认后再发送的文件传输，支持暂停、恢复和取消
+- 摄像头、麦克风可开关的音视频通话
+- 通话中的屏幕共享
+- 局域网优先直连，公网场景自动尝试 STUN / TURN
+- 前后端诊断留档，便于排查连接不稳和协商异常
+- 聊天历史优先保存在浏览器本地
 
-## Architecture
+## 架构说明
 
-### What the server does
+### 服务端负责什么
 
-- Signs and renews anonymous session cookies
-- Maintains room membership and WebSocket signaling
-- Serves `/api/ice` for WebRTC bootstrap
-- Accepts `/api/diagnostics` reports
+- 签发和续期匿名 session cookie
+- 维护房间成员和 WebSocket 信令
+- 提供 `/api/ice` 给前端建立 WebRTC
+- 接收 `/api/diagnostics` 诊断报告
 
-### What the server does not do
+### 服务端不负责什么
 
-- It does not store chat message bodies
-- It does not relay normal text messages
-- It does not carry normal media streams
-- It does not proxy normal file payloads
+- 不存储聊天正文
+- 不中转正常文本消息
+- 不承载正常音视频流
+- 不代理正常文件内容
 
-Under healthy network conditions, chat, files, and media stay on direct P2P channels. The server remains on the signaling and bootstrap path only.
+正常情况下，聊天、文件和媒体都尽量走浏览器之间的 P2P 连接，服务端只保留在信令和启动链路上。
 
-## Tech stack
+## 技术栈
 
-### Backend
+### 后端
 
 - Rust
 - Axum
 - Tokio
 - WebSocket signaling
-- HMAC-signed anonymous session cookie
+- HMAC 签名匿名 session cookie
 
-### Frontend
+### 前端
 
 - React 18
 - Vite
 - Tailwind CSS
 - WebRTC
 
-## Repository layout
+## 仓库结构
 
 ```text
 .
-├── src/                    # Rust backend
-├── frontend/               # React frontend
-├── deploy-local.sh         # Local one-click release script
-├── deploy.sh               # Remote server deploy script
-├── docker-compose.yml      # Server-side container orchestration
-├── .env.example            # Runtime config template
-└── .env.local.example      # Local private deploy config template
+├── src/                    # Rust 后端
+├── frontend/               # React 前端
+├── deploy-local.sh         # 本地一键发版脚本
+├── deploy.sh               # 服务器侧部署脚本
+├── docker-compose.yml      # 服务器容器编排
+├── .env.example            # 服务运行配置模板
+└── .env.local.example      # 本地发版私密配置模板
 ```
 
-## Local development
+## 本地开发
 
-Create a runtime config first:
+先准备运行配置：
 
 ```bash
 cp .env.example .env
 ```
 
-Recommended minimum:
+最少建议填写：
 
 ```env
 ALLOWED_ORIGINS=http://localhost:3456,http://127.0.0.1:3456
-SESSION_SECRET=replace-with-a-fixed-random-string
+SESSION_SECRET=替换成固定随机字符串
 ICE_PROVIDER=stun-only
 ```
 
-Build the frontend and run the Rust server:
+构建前端并启动后端：
 
 ```bash
 cd frontend
@@ -98,21 +98,21 @@ cd ..
 cargo run
 ```
 
-Then open:
+启动后访问：
 
 - `http://127.0.0.1:3456`
 - `http://localhost:3456`
 
-## Production deployment
+## 生产部署
 
-This repository uses a local-build, remote-pull workflow:
+当前仓库默认采用“本机构建，服务器拉镜像”的工作流：
 
-- Build frontend assets locally
-- Cross-compile the Linux binary locally with `cargo zigbuild`
-- Build and push the Docker image locally
-- Let the server run `docker compose pull` and `docker compose up -d`
+- 本机构建前端静态资源
+- 本机使用 `cargo zigbuild` 交叉编译 Linux 二进制
+- 本机打 Docker 镜像并推送镜像仓库
+- 服务器只执行 `docker compose pull` 和 `docker compose up -d`
 
-Prepare both config files:
+先准备两个配置文件：
 
 ```bash
 cp .env.example .env
@@ -121,16 +121,16 @@ cp .env.local.example .env.local
 
 ### `.env`
 
-This file contains runtime config and is uploaded to the server during deployment.
+这个文件是服务运行配置，发版时会同步到服务器。
 
-Typical example:
+常见写法：
 
 ```env
 APP_IMAGE=your-registry.example.com/your-namespace/patrick-im:latest
 APP_PULL_POLICY=always
 
 ALLOWED_ORIGINS=https://your-domain.com
-SESSION_SECRET=replace-with-a-fixed-random-string
+SESSION_SECRET=替换成固定随机字符串
 SESSION_TTL_SECONDS=2592000
 
 ICE_PROVIDER=cloudflare
@@ -141,13 +141,13 @@ CLOUDFLARE_TURN_TTL_SECONDS=86400
 FILTER_BROWSER_UNSAFE_TURN_URLS=true
 ```
 
-`ALLOWED_ORIGINS` supports multiple values separated by commas.
+`ALLOWED_ORIGINS` 支持多个域名，用英文逗号分隔。
 
 ### `.env.local`
 
-This file is only used by your local release script. It stays on your machine and is ignored by Git.
+这个文件只给你本机发版脚本使用，不会上服务器，也不会提交到 Git。
 
-Typical example:
+常见写法：
 
 ```env
 DEPLOY_SERVER_HOST=your-server-ip-or-domain
@@ -166,9 +166,9 @@ RUST_TARGET=x86_64-unknown-linux-musl
 PUSH_LATEST=true
 ```
 
-### One-command release
+### 一键发版
 
-Make sure the local machine has:
+确保本机已经安装：
 
 - Docker
 - Rust toolchain
@@ -177,22 +177,22 @@ Make sure the local machine has:
 - Node.js / npm
 - `sshpass`
 
-First-time setup:
+首次使用可以执行：
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
 cargo install cargo-zigbuild
 ```
 
-Then every release is:
+之后每次发版只需要：
 
 ```bash
 bash ./deploy-local.sh
 ```
 
-## ICE / TURN modes
+## ICE / TURN 模式
 
-The project supports three ICE modes:
+项目支持三种 ICE 模式：
 
 - `stun-only`
 - `static`
@@ -200,11 +200,11 @@ The project supports three ICE modes:
 
 ### `stun-only`
 
-Use this when you only want direct connectivity and NAT traversal, with no TURN relay fallback.
+只做直连和 NAT 打洞，不提供 TURN 中继兜底。
 
 ### `static`
 
-Use this for a self-hosted TURN server such as `coturn`:
+适合自建 `coturn` 之类的固定 TURN 服务：
 
 ```env
 ICE_PROVIDER=static
@@ -216,20 +216,20 @@ TURN_CREDENTIAL=your-password
 
 ### `cloudflare`
 
-Use this for Cloudflare Realtime TURN.
+适合使用 Cloudflare Realtime TURN。
 
-Important:
+注意：
 
-- The project does not use a Cloudflare management API token here
-- It expects the values shown on the TURN key page:
-  - `Turn Token ID`
-  - `API Token`
+- 这里不是填 Cloudflare 管理 API Token
+- 项目真正需要的是 TURN key 页面给出的：
+  - `Turn 令牌 ID`
+  - `API 令牌`
 
-On every `/api/ice` request, the backend asks Cloudflare for a fresh short-lived TURN credential set and returns the resulting `iceServers` to the frontend session.
+后端会在每次 `/api/ice` 请求时向 Cloudflare 动态申请一组短期 TURN 凭据，再把 `iceServers` 返回给当前前端会话。
 
-## Diagnostics and endpoints
+## 诊断与接口
 
-Available endpoints:
+主要接口：
 
 - `GET /healthz`
 - `GET /api/session`
@@ -238,13 +238,13 @@ Available endpoints:
 - `POST /api/diagnostics`
 - `GET /ws`
 
-When frontend diagnostics are enabled, the server writes reports into the `diagnostics/` directory.
+如果你启用了前端诊断上报，服务端会把报告写入 `diagnostics/` 目录。
 
-## Notes
+## 说明
 
-- The Go backend has been removed from the active mainline
-- Static frontend assets are embedded into the backend release artifact
-- The runtime image is intentionally minimal and expects build artifacts to be prepared locally
+- 当前主线已经移除 Go 后端
+- 前端静态资源会被打包进后端发布产物
+- Docker 运行镜像是最小化运行镜像，要求构建产物先在本地准备好
 
 ## License
 
