@@ -34,7 +34,7 @@ pub(crate) async fn post_diagnostics(
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok());
 
-    if !context.config.origin_allowed(origin) {
+    if !context.config.request_origin_allowed(&headers) {
         warn!("rejecting diagnostics upload from origin {:?}", origin);
         return Err((
             StatusCode::FORBIDDEN,

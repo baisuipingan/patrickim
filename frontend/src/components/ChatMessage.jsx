@@ -25,7 +25,9 @@ export default function ChatMessage({ message, displayName, isMine, onImageClick
         if (c.type === 'file-offer') {
             const offerStatusText = {
                 pending: '等待你确认',
+                preparing: '正在准备接收',
                 accepted: '已同意，等待开始传输',
+                timed_out: '等待开始传输超时',
                 receiving: '接收中',
                 completed: '已完成',
                 rejected: '你已拒绝',

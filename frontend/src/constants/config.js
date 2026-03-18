@@ -56,10 +56,10 @@ export const WS_CONFIG = {
  * 文件传输配置
  */
 export const FILE_TRANSFER_CONFIG = {
-    CHUNK_SIZE: 64 * 1024,                 // 64KB 分片，兼顾吞吐与兼容性
-    MAX_CHUNKS_PER_BURST: 8,               // 每次只发送小批次，给暂停/界面更新留机会
-    MAX_BUFFERED_AMOUNT: 512 * 1024,       // 最多预灌 512KB，避免暂停后还拖很久
-    BUFFER_LOW_THRESHOLD: 256 * 1024,      // 缓冲降到 256KB 后继续补数据
+    CHUNK_SIZE: 64 * 1024,                 // 64KB 分片，继续保持兼容性
+    MAX_CHUNKS_PER_BURST: 32,              // 单轮最多发 2MB，显著提升局域网吞吐
+    MAX_BUFFERED_AMOUNT: 4 * 1024 * 1024, // 默认最多预灌 4MB，专用文件通道会再翻倍
+    BUFFER_LOW_THRESHOLD: 2 * 1024 * 1024,// 缓冲回落到 2MB 后继续补数据
     PROGRESS_UPDATE_INTERVAL: 100          // 100ms 更新一次进度
 };
 
