@@ -1,0 +1,24 @@
+services:
+  app:
+    image: ${APP_IMAGE:-patrick-im:local}
+    pull_policy: ${APP_PULL_POLICY:-missing}
+    container_name: patrick-im-app
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3456:3456"
+    environment:
+      APP_PORT: 3456
+      DIAGNOSTICS_DIR: /app/diagnostics
+      RUST_LOG: ${RUST_LOG:-info}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-2592000}
+      ICE_PROVIDER: ${ICE_PROVIDER:-stun-only}
+      STUN_URLS: ${STUN_URLS:-stun:stun.cloudflare.com:3478}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
+      CLOUDFLARE_TURN_KEY_ID: ${CLOUDFLARE_TURN_KEY_ID:-}
+      CLOUDFLARE_TURN_API_TOKEN: ${CLOUDFLARE_TURN_API_TOKEN:-}
+      CLOUDFLARE_TURN_TTL_SECONDS: ${CLOUDFLARE_TURN_TTL_SECONDS:-86400}
+      FILTER_BROWSER_UNSAFE_TURN_URLS: ${FILTER_BROWSER_UNSAFE_TURN_URLS:-true}
