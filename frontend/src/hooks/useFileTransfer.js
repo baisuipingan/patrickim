@@ -1,6 +1,17 @@
-import { useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { formatSize, formatSpeed, formatTime } from '../utils/formatters';
-import { isImageFile, isModernFileAPISupported, showSaveFilePicker } from '../utils/fileUtils';
+import {
+    clearDefaultReceiveDirectory as clearStoredDefaultReceiveDirectory,
+    createWritableInDirectory,
+    getDefaultReceiveDirectory as getStoredDefaultReceiveDirectory,
+    isDirectoryPickerSupported,
+    isImageFile,
+    isModernFileAPISupported,
+    pickDefaultReceiveDirectory,
+    queryFileSystemPermission,
+    requestFileSystemPermission,
+    showSaveFilePicker
+} from '../utils/fileUtils';
 import { FILE_TRANSFER_CONFIG } from '../constants/config';
 
 const {
@@ -11,7 +22,7 @@ const {
     PROGRESS_UPDATE_INTERVAL
 } = FILE_TRANSFER_CONFIG;
 
-const OFFER_RESPONSE_TIMEOUT_MS = 60_000;
+const OFFER_RESPONSE_TIMEOUT_MS = 5 * 60_000;
 const FILE_DATA_CHANNEL_WAIT_MS = 5_000;
 const OFFER_ACCEPTED_START_TIMEOUT_MS = 15_000;
 const FILE_PICKER_ABORT_ERROR_NAMES = new Set(['AbortError', 'NotAllowedError', 'NotFoundError']);
@@ -33,6 +44,12 @@ const FILE_PICKER_ABORT_ERROR_NAMES = new Set(['AbortError', 'NotAllowedError', 
  */
 export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myId, getDisplayName, blobUrlsRef, activeUser, diagnostics }) {
     const [fileProgress, setFileProgress] = useState({});
+    const [defaultReceiveDirectory, setDefaultReceiveDirectory] = useState(() => ({
+        supported: isDirectoryPickerSupported(),
+        status: isDirectoryPickerSupported() ? 'loading' : 'unsupported',
+        name: ''
+    }));
+    const [receiveDirectoryBusy, setReceiveDirectoryBusy] = useState(false);
     
     const transferControlRef = useRef({});
     const incomingFilesRef = useRef({});
@@ -41,6 +58,7 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
     const pendingIncomingDoneRef = useRef({});
     const fileQueueRef = useRef([]);
     const isSendingFileRef = useRef(false);
+    const defaultReceiveDirectoryRef = useRef(null);
 
     const recordFileEvent = useCallback((kind, data = {}, options = {}) => {
         diagnostics?.recordEvent(kind, data, {
@@ -55,6 +73,146 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
             ...options
         });
     }, [diagnostics]);
+
+    const applyDefaultReceiveDirectoryState = useCallback((handle, status) => {
+        defaultReceiveDirectoryRef.current = handle || null;
+        setDefaultReceiveDirectory({
+            supported: isDirectoryPickerSupported(),
+            status,
+            name: handle?.name || ''
+        });
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadDefaultReceiveDirectory = async () => {
+            if (!isDirectoryPickerSupported()) {
+                applyDefaultReceiveDirectoryState(null, 'unsupported');
+                return;
+            }
+
+            try {
+                const handle = await getStoredDefaultReceiveDirectory();
+                if (cancelled) {
+                    return;
+                }
+
+                if (!handle) {
+                    applyDefaultReceiveDirectoryState(null, 'not-configured');
+                    return;
+                }
+
+                const permission = await queryFileSystemPermission(handle, {
+                    writable: true
+                });
+                if (cancelled) {
+                    return;
+                }
+
+                applyDefaultReceiveDirectoryState(handle, permission === 'granted' ? 'ready' : 'needs-permission');
+            } catch (error) {
+                console.warn('Failed to load default receive directory:', error);
+                applyDefaultReceiveDirectoryState(null, 'not-configured');
+            }
+        };
+
+        void loadDefaultReceiveDirectory();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [applyDefaultReceiveDirectoryState]);
+
+    const configureDefaultReceiveDirectory = useCallback(async () => {
+        if (!isDirectoryPickerSupported() || receiveDirectoryBusy) {
+            return false;
+        }
+
+        setReceiveDirectoryBusy(true);
+        try {
+            const handle = await pickDefaultReceiveDirectory();
+            const permission = await queryFileSystemPermission(handle, {
+                writable: true
+            });
+            applyDefaultReceiveDirectoryState(handle, permission === 'granted' ? 'ready' : 'needs-permission');
+            recordFileEvent('default_receive_directory_configured', {
+                directoryName: handle?.name || ''
+            });
+            return true;
+        } catch (error) {
+            if (FILE_PICKER_ABORT_ERROR_NAMES.has(error?.name)) {
+                return false;
+            }
+
+            console.error('Failed to configure default receive directory:', error);
+            reportFileIssue('default_receive_directory_config_failed', {
+                message: error?.message || 'unknown',
+                name: error?.name || 'Error'
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'file-receive'
+                }
+            });
+            return false;
+        } finally {
+            setReceiveDirectoryBusy(false);
+        }
+    }, [applyDefaultReceiveDirectoryState, receiveDirectoryBusy, recordFileEvent, reportFileIssue]);
+
+    const clearDefaultReceiveDirectory = useCallback(async () => {
+        if (receiveDirectoryBusy) {
+            return false;
+        }
+
+        setReceiveDirectoryBusy(true);
+        try {
+            await clearStoredDefaultReceiveDirectory();
+            applyDefaultReceiveDirectoryState(null, isDirectoryPickerSupported() ? 'not-configured' : 'unsupported');
+            recordFileEvent('default_receive_directory_cleared');
+            return true;
+        } catch (error) {
+            console.error('Failed to clear default receive directory:', error);
+            reportFileIssue('default_receive_directory_clear_failed', {
+                message: error?.message || 'unknown',
+                name: error?.name || 'Error'
+            }, {
+                delayMs: 1500,
+                context: {
+                    feature: 'file-receive'
+                }
+            });
+            return false;
+        } finally {
+            setReceiveDirectoryBusy(false);
+        }
+    }, [applyDefaultReceiveDirectoryState, receiveDirectoryBusy, recordFileEvent, reportFileIssue]);
+
+    const prepareWriterFromDefaultDirectory = useCallback(async (fileName) => {
+        const directoryHandle = defaultReceiveDirectoryRef.current;
+        if (!directoryHandle || !isDirectoryPickerSupported()) {
+            return null;
+        }
+
+        let permission = await queryFileSystemPermission(directoryHandle, {
+            writable: true
+        });
+        if (permission !== 'granted') {
+            permission = await requestFileSystemPermission(directoryHandle, {
+                writable: true
+            });
+        }
+
+        if (permission !== 'granted') {
+            applyDefaultReceiveDirectoryState(directoryHandle, 'needs-permission');
+            return null;
+        }
+
+        const prepared = await createWritableInDirectory(directoryHandle, fileName);
+        applyDefaultReceiveDirectoryState(directoryHandle, 'ready');
+        return prepared;
+    }, [applyDefaultReceiveDirectoryState]);
 
     async function settleFileWriter(target, { abort = false } = {}) {
         if (!target?.writer) {
@@ -1359,11 +1517,31 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
         const shouldStreamToDisk = !isImageTransfer && isModernFileAPISupported();
         if (shouldStreamToDisk) {
             try {
-                const { fileHandle, writer } = await showSaveFilePicker(offer.name);
+                let preparedTarget = null;
+
+                if (defaultReceiveDirectoryRef.current) {
+                    try {
+                        preparedTarget = await prepareWriterFromDefaultDirectory(offer.name);
+                    } catch (error) {
+                        console.warn('Failed to use default receive directory, falling back to save picker:', error);
+
+                        if (['InvalidStateError', 'NotFoundError'].includes(error?.name)) {
+                            await clearStoredDefaultReceiveDirectory();
+                            applyDefaultReceiveDirectoryState(null, 'not-configured');
+                        }
+                    }
+                }
+
+                if (!preparedTarget) {
+                    preparedTarget = await showSaveFilePicker(offer.name);
+                }
+
+                const { fileHandle, writer, finalName } = preparedTarget;
                 offer.fileHandle = fileHandle;
                 offer.writer = writer;
                 offer.writerState = 'open';
                 offer.saveStrategy = 'disk';
+                offer.savedFileName = finalName || offer.name;
             } catch (error) {
                 offer.status = 'pending';
                 updateFileOfferMessage(fromUserId, fileId, {
@@ -1734,13 +1912,15 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
             fileHandle: preparedFileHandle,
             writer: preparedWriter,
             writerState: preparedWriterState,
-            storageMode: usesStreamToDisk ? 'disk' : 'memory'
+            storageMode: usesStreamToDisk ? 'disk' : 'memory',
+            savedFileName: usesStreamToDisk ? (offer?.savedFileName || fileMeta.name) : fileMeta.name
         };
 
         if (offer) {
             offer.fileHandle = null;
             offer.writer = null;
             delete offer.writerState;
+            delete offer.savedFileName;
         }
 
         recordFileEvent('file_receive_started', {
@@ -1906,7 +2086,7 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
             addChat({
                 from: remoteId,
                 type: 'file',
-                name: transfer.meta.name,
+                name: transfer.savedFileName || transfer.meta.name,
                 data: 'file-saved-to-disk',
                 mode: transfer.meta.mode || 'broadcast',
                 savedToDisk: true
@@ -2127,6 +2307,10 @@ export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myI
         handleIncomingFileMessage,
         getTransferPausedState,
         toggleTransferPause,
-        cancelTransfer
+        cancelTransfer,
+        defaultReceiveDirectory,
+        receiveDirectoryBusy,
+        configureDefaultReceiveDirectory,
+        clearDefaultReceiveDirectory
     };
 }

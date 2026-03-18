@@ -12,7 +12,7 @@ import ChatMessage from './components/ChatMessage';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Badge } from './components/ui/badge';
-import { Menu, Globe, Edit2, X, Trash2, Upload, Video, Phone } from 'lucide-react';
+import { Menu, Globe, Edit2, X, Trash2, Upload, Video, Phone, FolderOpen } from 'lucide-react';
 import { useVideoCall, CALL_STATUS } from './hooks/useVideoCall';
 import { IncomingCallModal, CallingModal, VideoCallWindow } from './components/VideoCall';
 import { cn } from './lib/utils';
@@ -501,7 +501,11 @@ function ChatApp() {
         handleIncomingFileMessage,
         getTransferPausedState,
         toggleTransferPause,
-        cancelTransfer
+        cancelTransfer,
+        defaultReceiveDirectory,
+        receiveDirectoryBusy,
+        configureDefaultReceiveDirectory,
+        clearDefaultReceiveDirectory
     } = useFileTransfer({
         log,
         addChat,
@@ -914,6 +918,11 @@ function ChatApp() {
             offline: '信令已离线',
             unknown: currentWsStatus.text
         }[activeSignalPresence] || currentWsStatus.text);
+    const receiveDirectoryBadgeText = defaultReceiveDirectory.status === 'ready'
+        ? `接收目录: ${defaultReceiveDirectory.name}`
+        : defaultReceiveDirectory.status === 'needs-permission'
+            ? `接收目录待授权: ${defaultReceiveDirectory.name}`
+            : null;
 
     if (sessionError) {
         return (
@@ -1178,6 +1187,20 @@ function ChatApp() {
                                         </Badge>
                                     </>
                                 )}
+                                {receiveDirectoryBadgeText && (
+                                    <Badge
+                                        variant="outline"
+                                        className={cn(
+                                            "text-xs h-5 px-2 max-w-[220px] truncate",
+                                            defaultReceiveDirectory.status === 'ready'
+                                                ? "border-amber-200 text-amber-700"
+                                                : "border-orange-200 text-orange-700"
+                                        )}
+                                        title={receiveDirectoryBadgeText}
+                                    >
+                                        {receiveDirectoryBadgeText}
+                                    </Badge>
+                                )}
                                 {nickname ? (
                                     <div className="flex items-center gap-1">
                                         <span className="text-xs text-muted-foreground">
@@ -1232,6 +1255,29 @@ function ChatApp() {
                             </div>
                         )}
                         
+                        <Button 
+                            onClick={() => void configureDefaultReceiveDirectory()}
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs shrink-0"
+                            disabled={receiveDirectoryBusy || !defaultReceiveDirectory.supported}
+                            title={defaultReceiveDirectory.supported ? '设置默认接收目录' : '当前环境不支持默认接收目录'}
+                        >
+                            <FolderOpen className="w-3.5 h-3.5 mr-1" />
+                            {defaultReceiveDirectory.name ? '收件目录' : '设置收件目录'}
+                        </Button>
+                        {defaultReceiveDirectory.name && (
+                            <Button
+                                onClick={() => void clearDefaultReceiveDirectory()}
+                                size="sm"
+                                variant="ghost"
+                                className="h-8 w-8 p-0 shrink-0"
+                                disabled={receiveDirectoryBusy}
+                                title="清除默认接收目录"
+                            >
+                                <X className="w-4 h-4" />
+                            </Button>
+                        )}
                         <Button 
                             onClick={handleClearHistory}
                             size="sm"
