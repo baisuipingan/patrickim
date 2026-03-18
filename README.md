@@ -1,139 +1,257 @@
 # patrick-im
 
-一个现代化、高性能的点对点（P2P）即时通讯系统。它利用 WebRTC 技术实现端到端的加密通信，无需中心化服务器存储消息，真正保护用户隐私。系统能够智能识别网络环境，在局域网内自动直连以获得最高速度，在公网环境下通过 STUN/TURN 实现穿透连接。当前版本采用 Rust 信令服务，并由服务端签发匿名会话，无需注册登录即可直接进房间。
+`patrick-im` 是一个以 WebRTC 为核心的点对点即时通信项目，提供匿名入房、文本聊天、文件传输、音视频通话和屏幕共享能力。当前主分支基于 `Rust + Axum + React`，服务端只负责匿名 session、房间信令、ICE 配置和诊断上报，消息与媒体数据尽量走浏览器之间的 P2P 连接。
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Rust](https://img.shields.io/badge/backend-Rust%20%2B%20Axum-orange.svg)
-![React](https://img.shields.io/badge/frontend-React%2018-61DAFB.svg)
+## 当前状态
 
-## ✨ 核心特性
+- 当前主分支 `main`：Rust 信令服务版本
+- 旧版 Go 实现：`main-go` 分支
+- 旧版 Go 最后快照：`go-legacy-final` tag
 
-### 🌐 智能混合网络
-- **自适应连接**：自动检测网络环境，优先选择局域网直连（速度最快），公网环境自动进行 NAT 穿透。
-- **状态可视化**：在用户列表中通过不同图标（🏠局域网 / 🌐公网）直观展示连接类型。
-- **网络切换**：支持在不同网络环境间无缝切换，自动重连。
+如果你是从早期 Go 版仓库进来的，建议直接看 `main`；如果你要对比迁移前实现或兼容旧部署，可以切到 `main-go`。
 
-### 📁 强大的文件传输
-- **无界传输**：基于 DataChannel 的流式传输，支持 GB 级大文件，不受服务器带宽限制。
-- **断点续传**：传输中断后可随时恢复，无需重新开始。
-- **完整性校验**：实时 SHA-256 哈希校验，确保文件数据 100% 准确。
-- **传输控制**：支持暂停、恢复、取消传输，实时显示传输速度和剩余时间。
+## 核心特性
 
-### 💬 极致聊天体验
-- **智能未读管理**：
-  - 自动记录未读消息数
-  - 醒目的未读红线定位
-  - 智能滚动：有未读消息时自动定位到第一条未读，无未读时直达底部
-- **消息持久化**：聊天记录存储在本地浏览器中，刷新页面不丢失，且数据完全由用户掌控。
-- **多模式聊天**：支持全局广播（Global Chat）和私密点对点聊天（Private Chat）。
-- **房间即入口**：默认匿名入站，无需登录，进入网站后直接选房间或输入房间号即可加入。
+- 匿名入站：无需注册登录，进入网站后直接选择房间或输入房间号
+- P2P 文本聊天：优先通过 DataChannel 在浏览器之间直连传输
+- 文件传输：支持接收方确认后再开始发送，支持暂停、恢复、取消
+- 音视频通话：支持摄像头、麦克风开关和屏幕共享
+- 网络自适应：优先局域网直连，公网下自动尝试 STUN / TURN
+- 诊断留档：连接异常、信令异常、数据通道关闭等问题可落盘排查
+- 本地优先：聊天历史保存在浏览器本地，不依赖中心化消息存储
 
-### 📞 音视频通话
-- **高清视频通话**：基于 WebRTC 的点对点视频通话，支持 720p 高清画质。
-- **语音通话**：纯语音通话模式，节省带宽。
-- **动态切换**：通话中可随时开关摄像头和麦克风。
-- **设备兼容**：自动检测设备，无摄像头/麦克风也可接收对方音视频（仅接收模式）。
-- **双连接架构**：数据通道和媒体通道分离，聊天/文件传输不会再直接拖慢音视频协商。
+## 技术栈
 
-### 🖥️ 屏幕共享
-- **一键共享**：通话中随时开启屏幕共享，支持共享整个屏幕、应用窗口或浏览器标签页。
-- **实时同步**：通过 SDP 重新协商确保分辨率变化时对方能正确接收。
-- **全屏观看**：接收方可全屏查看共享内容，视频保持原始比例不拉伸。
+### 后端
 
-### 🎨 现代化界面
-- **响应式设计**：完美适配桌面端和移动端，侧边栏在移动端自动折叠。
-- **美观交互**：基于 shadcn/ui 和 Tailwind CSS 构建，提供流畅的动画和精致的视觉效果。
-- **实时状态**：在线人数、用户状态（连接中/已连接/离线）实时更新。
+- Rust
+- Axum
+- Tokio
+- WebSocket signaling
+- HMAC-signed anonymous session cookie
 
-## 🛠️ 技术栈
+### 前端
 
-**后端 (Backend)**
-- **Rust + Axum + Tokio**: 高性能异步信令服务
-- **WebSocket**: 可靠的信令交换通道
-- **匿名会话 Cookie**: 服务端签发匿名身份，不再信任前端自报 `userId`
+- React 18
+- Vite
+- Tailwind CSS
+- WebRTC
 
-**前端 (Frontend)**
-- **React 18**: 组件化 UI 开发
-- **Vite 3**: 极速构建体验
-- **WebRTC**: 核心 P2P 通信技术
-- **Tailwind CSS**: 原子化 CSS 样式
-- **shadcn/ui**: 高质量 UI 组件库
+## 项目结构
 
-## 🚀 快速开始
-
-### 方式一：Docker Compose 部署（推荐）
-
-当前推荐使用“`Rust app` 容器 + 服务器现有反向代理”的方式。服务器上的 Nginx/Caddy 只需要转发到 `127.0.0.1:3456`，构建全部在你本机完成。
-
-```bash
-# 1. 准备服务端运行配置
-cp .env.example .env
-
-# 2. 准备本机私密发版配置
-cp .env.local.example .env.local
-
-# 3. 每次发版只需要这一条
-bash ./deploy-local.sh
+```text
+.
+├── src/                    # Rust 服务端
+├── frontend/               # React 前端
+├── deploy-local.sh         # 本地一键发版脚本
+├── deploy.sh               # 服务器侧部署脚本
+├── docker-compose.yml      # 服务器容器编排
+├── .env.example            # 服务运行配置模板
+└── .env.local.example      # 本地发版私密配置模板
 ```
 
-说明：
-- `.env` 只放服务端运行配置，例如 `APP_IMAGE`、`ALLOWED_ORIGINS`、`SESSION_SECRET`、ICE/TURN 配置。
-- `.env.local` 只放你本机发版需要的私密配置，例如 SSH 密码、阿里云镜像仓库账号密码。
-- `deploy-local.sh` 会先在本机构建前端，再用 `cargo zigbuild` 交叉编译 Linux 二进制，最后只打一个运行镜像推送到阿里云。
-- Docker Compose 只负责替换 `3456` 上的应用容器；`80/443` 继续由服务器已经存在的 Nginx/Caddy 接管。
-- `IMAGE_TAG` 留空时，脚本默认使用当前 git 提交短 SHA，同时额外推送一个 `latest` 标签，服务器侧通常直接拉 `latest`。
-- 首次使用请确保本机具备 `zig`、`cargo-zigbuild`，并执行过一次：
+## 工作方式
+
+### 服务端负责什么
+
+- 签发匿名 session
+- 维护房间成员和 WebSocket 信令
+- 返回 `/api/ice` 给前端建立 WebRTC
+- 接收 `/api/diagnostics` 诊断报告
+
+### 服务端不负责什么
+
+- 不存储聊天消息正文
+- 不中转正常的文本消息
+- 不承载正常的音视频流
+- 不承载正常的文件内容
+
+正常情况下，消息、文件、音视频都尽量走 P2P；只有信令、身份和 TURN 凭据获取仍然经过服务端。
+
+## 快速开始
+
+### 1. 本地开发
+
+先准备运行配置：
+
+```bash
+cp .env.example .env
+```
+
+至少建议填好：
+
+```env
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+SESSION_SECRET=替换成一串固定随机字符串
+ICE_PROVIDER=stun-only
+```
+
+安装前端依赖并运行：
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+
+cargo run
+```
+
+启动后访问：
+
+- `http://127.0.0.1:3456`
+- `http://localhost:3456`
+
+## 2. 生产部署
+
+当前仓库默认采用：
+
+- 本机构建前端
+- 本机使用 `cargo zigbuild` 交叉编译 Linux 二进制
+- 本机打 Docker 镜像并推送镜像仓库
+- 服务器只执行 `docker compose pull` 和 `docker compose up -d`
+
+先准备两个配置文件：
+
+```bash
+cp .env.example .env
+cp .env.local.example .env.local
+```
+
+### `.env`
+
+这个文件是服务运行配置，会同步到服务器。
+
+常用项：
+
+```env
+APP_IMAGE=your-registry.example.com/your-namespace/patrick-im:latest
+APP_PULL_POLICY=always
+
+ALLOWED_ORIGINS=https://your-domain.com
+SESSION_SECRET=替换成固定随机字符串
+SESSION_TTL_SECONDS=2592000
+
+ICE_PROVIDER=cloudflare
+STUN_URLS=stun:stun.cloudflare.com:3478
+CLOUDFLARE_TURN_KEY_ID=your-turn-key-id
+CLOUDFLARE_TURN_API_TOKEN=your-turn-api-token
+CLOUDFLARE_TURN_TTL_SECONDS=86400
+FILTER_BROWSER_UNSAFE_TURN_URLS=true
+```
+
+`ALLOWED_ORIGINS` 支持多个域名，使用英文逗号分隔。
+
+### `.env.local`
+
+这个文件只给你本机发版脚本使用，不会上服务器，也不会提交到 Git。
+
+常用项：
+
+```env
+DEPLOY_SERVER_HOST=your-server-ip-or-domain
+DEPLOY_SERVER_PORT=22
+DEPLOY_SERVER_USER=root
+DEPLOY_SERVER_PASSWORD=your-ssh-password
+DEPLOY_PROJECT_DIR=/home/patrick-im
+
+ACR_REGISTRY=your-registry.example.com
+IMAGE_REPO=your-registry.example.com/your-namespace/patrick-im
+ACR_USERNAME=your-registry-username
+ACR_PASSWORD=your-registry-password
+
+PLATFORMS=linux/amd64
+RUST_TARGET=x86_64-unknown-linux-musl
+PUSH_LATEST=true
+```
+
+### 一键发版
+
+确保本机已经安装：
+
+- Docker
+- Rust toolchain
+- Zig
+- `cargo-zigbuild`
+- Node.js / npm
+- `sshpass`
+
+首次使用可以执行：
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
 cargo install cargo-zigbuild
 ```
 
-### 方式二：本地源码运行
-
-适合开发和调试。
+然后每次发版只需要：
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/your-repo/patrickim.git
-cd patrickim
-
-# 2. 准备本地环境变量（推荐）
-cp .env.example .env
-# 至少给 SESSION_SECRET 一个固定值，避免后端重启后匿名 session 全部失效
-
-# 3. 构建前端
-cd frontend
-npm install
-npm run build
-cd ..
-
-# 4. 运行后端
-cargo run
+bash ./deploy-local.sh
 ```
 
-说明：
-- `cargo run` 会自动读取项目根目录下的 `.env`；显式传入的 shell 环境变量优先级更高。
-- 生产发版用 `.env + .env.local`；本地开发通常只需要 `.env`。
-- `http://localhost` 或 `http://127.0.0.1` 在多数桌面浏览器里可以直接调用 `getUserMedia`。
-- 如果要做局域网 HTTPS 调试，建议自行在反向代理层处理证书，而不是依赖仓库内脚本。
+## TURN 配置说明
 
-匿名会话说明：
-- `GET /api/session` 会由服务端签发匿名 Cookie，浏览器后续连接 `/ws` 时自动携带。
-- 生产环境建议显式设置 `SESSION_SECRET`；如果不配置，服务重启后匿名会话会失效。
-- 本地开发如果不设置固定的 `SESSION_SECRET`，旧标签页在服务重启后会短暂出现 `invalid anonymous session` 警告；刷新页面或等待前端自动续期即可恢复。
+项目支持三种 ICE 模式：
 
-## 📝 开发计划
+- `stun-only`
+- `static`
+- `cloudflare`
 
-- [x] 基础 P2P 聊天与文件传输
-- [x] 断点续传与哈希校验
-- [x] 局域网/公网智能切换与标识
-- [x] 消息持久化与历史记录
-- [x] 未读消息计数与智能定位
-- [x] 音视频通话支持
-- [x] 屏幕共享功能
-- [ ] 集成AI相关
+### `stun-only`
 
-## 📄 License
+只用于直连和 NAT 打洞，不提供 TURN 中继。
 
-MIT License - 自由使用，欢迎贡献！
+### `static`
+
+适合自建 `coturn` 之类的固定 TURN 服务器：
+
+```env
+ICE_PROVIDER=static
+STUN_URLS=stun:stun.cloudflare.com:3478
+TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp
+TURN_USERNAME=your-username
+TURN_CREDENTIAL=your-password
+```
+
+### `cloudflare`
+
+适合使用 Cloudflare Realtime TURN。
+
+注意：
+
+- 项目里填的不是 Cloudflare 管理 API Token
+- 这里需要的是 TURN key 页面给出的：
+  - `Turn 令牌 ID`
+  - `API 令牌`
+
+后端会在每次 `/api/ice` 请求时向 Cloudflare 动态申请一组短期 TURN 凭据，再返回给当前前端会话使用。
+
+## 诊断
+
+可用接口：
+
+- `GET /healthz`
+- `GET /api/session`
+- `GET /api/ice`
+- `GET /api/rooms`
+- `POST /api/diagnostics`
+- `GET /ws`
+
+生产环境里如果你启用了前端诊断上报，服务端会将报告写入 `diagnostics/` 目录。
+
+## 开发说明
+
+- 当前主线已经移除 Go 后端，服务端实现集中在 `src/`
+- 前端与后端通过内嵌静态资源方式一起发布
+- Docker 运行镜像是最小化运行镜像，构建产物由本机准备
+
+## 路线图
+
+- 更细的连接诊断与连接类型展示
+- 更稳定的长时间通话重协商
+- 更强的文件传输可观测性
+- 更完整的开源文档和部署模板
+
+## License
+
+MIT
