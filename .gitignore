@@ -5,6 +5,8 @@ target
 diagnostics
 frontend/diagnostics
 .idea/
+!deploy/runtime-rootfs/app/diagnostics/
+!deploy/runtime-rootfs/app/diagnostics/.gitkeep
 patrick-im
 patrick-im.exe
 patrick-im-server
