@@ -11,6 +11,14 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_DIR:-/home/patrick-im}"
 DEPLOY_MODE="${DEPLOY_MODE:-registry}"
 
+docker_cmd() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  else
+    sudo docker "$@"
+  fi
+}
+
 echo "=========================================="
 echo "开始部署 patrick-im"
 echo "=========================================="
@@ -28,26 +36,26 @@ if [ "$DEPLOY_MODE" = "git-build" ]; then
 
   echo ""
   echo ">>> 步骤 3: 构建并重启服务"
-  docker compose up -d --build --remove-orphans
+  docker_cmd compose up -d --build --remove-orphans
 else
   echo ""
   echo ">>> 步骤 2: 拉取镜像"
-  docker compose pull app
+  docker_cmd compose pull app
 
   echo ""
   echo ">>> 步骤 3: 使用最新镜像重启服务"
-  docker compose up -d --remove-orphans
+  docker_cmd compose up -d --remove-orphans
 fi
 
 # 4. 清理旧镜像
 echo ""
 echo ">>> 步骤 4: 清理悬空镜像"
-docker image prune -f
+docker_cmd image prune -f
 
 # 5. 显示运行状态
 echo ""
 echo ">>> 步骤 5: 当前运行状态"
-docker compose ps
+docker_cmd compose ps
 
 echo ""
 echo "=========================================="

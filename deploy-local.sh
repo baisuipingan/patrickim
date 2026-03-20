@@ -33,6 +33,7 @@ PLATFORMS="${PLATFORMS:-linux/amd64}"
 PUSH_LATEST="${PUSH_LATEST:-true}"
 RUST_TARGET="${RUST_TARGET:-}"
 CURRENT_CONTEXT="$(docker context show)"
+DEPLOY_SERVER_SSH_KEY="${DEPLOY_SERVER_SSH_KEY:-}"
 SSH_STRICT_HOST_KEY_CHECKING="${SSH_STRICT_HOST_KEY_CHECKING:-no}"
 SERVER_BINARY=""
 
@@ -72,11 +73,7 @@ for name in \
   DEPLOY_SERVER_HOST \
   DEPLOY_SERVER_PORT \
   DEPLOY_SERVER_USER \
-  DEPLOY_SERVER_PASSWORD \
   DEPLOY_PROJECT_DIR \
-  ACR_REGISTRY \
-  ACR_USERNAME \
-  ACR_PASSWORD \
   IMAGE_REPO; do
   if [ -z "${!name:-}" ]; then
     missing+=("$name")
@@ -89,13 +86,22 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
+if [ -n "$DEPLOY_SERVER_SSH_KEY" ] && [ ! -f "$DEPLOY_SERVER_SSH_KEY" ]; then
+  echo "找不到 SSH 私钥文件：$DEPLOY_SERVER_SSH_KEY"
+  exit 1
+fi
+
 SSH_OPTS=(-p "$DEPLOY_SERVER_PORT" -o "StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING")
 SCP_OPTS=(-P "$DEPLOY_SERVER_PORT" -o "StrictHostKeyChecking=$SSH_STRICT_HOST_KEY_CHECKING")
 TARGET="${DEPLOY_SERVER_USER}@${DEPLOY_SERVER_HOST}"
 
 SSH_CMD=(ssh "${SSH_OPTS[@]}")
 SCP_CMD=(scp "${SCP_OPTS[@]}")
-if command -v sshpass >/dev/null 2>&1; then
+
+if [ -n "$DEPLOY_SERVER_SSH_KEY" ]; then
+  SSH_CMD+=( -i "$DEPLOY_SERVER_SSH_KEY" )
+  SCP_CMD+=( -i "$DEPLOY_SERVER_SSH_KEY" )
+elif [ -n "${DEPLOY_SERVER_PASSWORD:-}" ] && command -v sshpass >/dev/null 2>&1; then
   SSH_CMD=(sshpass -p "$DEPLOY_SERVER_PASSWORD" ssh "${SSH_OPTS[@]}")
   SCP_CMD=(sshpass -p "$DEPLOY_SERVER_PASSWORD" scp "${SCP_OPTS[@]}")
 fi
@@ -149,7 +155,11 @@ fi
 
 echo ""
 echo ">>> 步骤 3: 登录本地阿里云镜像仓库"
-printf '%s' "$ACR_PASSWORD" | docker login --username="$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+if [ -n "${ACR_USERNAME:-}" ] && [ -n "${ACR_PASSWORD:-}" ]; then
+  printf '%s' "$ACR_PASSWORD" | docker login --username="$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+else
+  echo "未提供 ACR_USERNAME / ACR_PASSWORD，跳过本地 docker login，直接使用当前 Docker 已保存的登录态。"
+fi
 
 echo ""
 echo ">>> 步骤 4: 构建运行镜像"
@@ -169,7 +179,13 @@ fi
 
 echo ""
 echo ">>> 步骤 6: 准备服务器目录"
-"${SSH_CMD[@]}" "$TARGET" "mkdir -p '$DEPLOY_PROJECT_DIR'"
+"${SSH_CMD[@]}" "$TARGET" /bin/bash <<EOF
+set -euo pipefail
+if [ ! -d $(printf '%q' "$DEPLOY_PROJECT_DIR") ]; then
+  sudo mkdir -p $(printf '%q' "$DEPLOY_PROJECT_DIR")
+  sudo chown "\$(id -un):\$(id -gn)" $(printf '%q' "$DEPLOY_PROJECT_DIR")
+fi
+EOF
 
 echo ""
 echo ">>> 步骤 7: 同步部署文件到服务器"
@@ -182,9 +198,23 @@ echo ">>> 步骤 8: 服务器登录镜像仓库并更新容器"
 "${SSH_CMD[@]}" "$TARGET" /bin/bash <<EOF
 set -euo pipefail
 cd $(printf '%q' "$DEPLOY_PROJECT_DIR")
-printf '%s' $(printf '%q' "$ACR_PASSWORD") | docker login --username $(printf '%q' "$ACR_USERNAME") --password-stdin $(printf '%q' "$ACR_REGISTRY")
+ACR_USERNAME=$(printf '%q' "${ACR_USERNAME:-}")
+ACR_PASSWORD=$(printf '%q' "${ACR_PASSWORD:-}")
+ACR_REGISTRY=$(printf '%q' "$ACR_REGISTRY")
+docker_cmd() {
+  if docker info >/dev/null 2>&1; then
+    docker "\$@"
+  else
+    sudo docker "\$@"
+  fi
+}
+if [ -n "\$ACR_USERNAME" ] && [ -n "\$ACR_PASSWORD" ]; then
+  printf '%s' "\$ACR_PASSWORD" | docker_cmd login --username "\$ACR_USERNAME" --password-stdin "\$ACR_REGISTRY"
+else
+  echo "未提供 ACR_USERNAME / ACR_PASSWORD，跳过服务器 docker login，直接使用服务器已保存的登录态。"
+fi
 chmod +x deploy.sh
-DEPLOY_MODE=registry ./deploy.sh
+PROJECT_DIR=$(printf '%q' "$DEPLOY_PROJECT_DIR") DEPLOY_MODE=registry ./deploy.sh
 EOF
 
 echo ""

@@ -16,3 +16,4 @@ patrick-im-server.exe
 .env.*
 !.env.example
 !.env.local.example
+*.pem
