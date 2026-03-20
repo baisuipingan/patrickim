@@ -1,11 +1,11 @@
 services:
   app:
-    image: ${APP_IMAGE:-patrick-im:local}
-    pull_policy: ${APP_PULL_POLICY:-missing}
+    image: ${APP_IMAGE:-crpi-6yrxqnyn3y05zbgq.cn-qingdao.personal.cr.aliyuncs.com/patrickcmh/patrick-im:latest}
+    pull_policy: ${APP_PULL_POLICY:-always}
     container_name: patrick-im-app
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3456:3456"
+      - "${APP_PORT_BIND:-127.0.0.1:3456:3456}"
     environment:
       APP_PORT: 3456
       DIAGNOSTICS_DIR: /app/diagnostics
@@ -22,3 +22,8 @@ services:
       CLOUDFLARE_TURN_API_TOKEN: ${CLOUDFLARE_TURN_API_TOKEN:-}
       CLOUDFLARE_TURN_TTL_SECONDS: ${CLOUDFLARE_TURN_TTL_SECONDS:-86400}
       FILTER_BROWSER_UNSAFE_TURN_URLS: ${FILTER_BROWSER_UNSAFE_TURN_URLS:-true}
+    volumes:
+      - patrick-im-diagnostics:/app/diagnostics
+
+volumes:
+  patrick-im-diagnostics:

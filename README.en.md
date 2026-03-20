@@ -64,11 +64,10 @@ Under healthy network conditions, chat, files, and media stay on direct P2P chan
 .
 ├── src/                    # Rust backend
 ├── frontend/               # React frontend
-├── deploy-local.sh         # Local one-click release script
-├── deploy.sh               # Remote server deploy script
-├── docker-compose.yml      # Server-side container orchestration
+├── Dockerfile              # Runtime image build file
+├── docker-compose.yaml     # Docker Compose entrypoint
 ├── .env.example            # Runtime config template
-└── .env.local.example      # Local private deploy config template
+└── deploy/runtime-rootfs/  # Rootfs used by the scratch runtime image
 ```
 
 ## Local development
@@ -103,92 +102,60 @@ Then open:
 - `http://127.0.0.1:3456`
 - `http://localhost:3456`
 
-## Production deployment
+## Docker Compose Quick Start
 
-This repository uses a local-build, remote-pull workflow:
+For public users, `docker-compose.yaml` is the main entrypoint.
+Think of this repository as: pull the public image, then inject runtime config through `.env`.
 
-- Build frontend assets locally
-- Cross-compile the Linux binary locally with `cargo zigbuild`
-- Build and push the Docker image locally
-- Let the server run `docker compose pull` and `docker compose up -d`
-
-Prepare both config files:
+Create a runtime config first:
 
 ```bash
 cp .env.example .env
-cp .env.local.example .env.local
 ```
 
-### `.env`
-
-This file contains runtime config and is uploaded to the server during deployment.
-
-Typical example:
+The default `.env.example` is already usable for local evaluation and includes values like:
 
 ```env
-APP_IMAGE=your-registry.example.com/your-namespace/patrick-im:latest
-APP_PULL_POLICY=always
-
-ALLOWED_ORIGINS=https://your-domain.com
-SESSION_SECRET=replace-with-a-fixed-random-string
-SESSION_TTL_SECONDS=2592000
-
-ICE_PROVIDER=cloudflare
-STUN_URLS=stun:stun.cloudflare.com:3478
-CLOUDFLARE_TURN_KEY_ID=your-turn-key-id
-CLOUDFLARE_TURN_API_TOKEN=your-turn-api-token
-CLOUDFLARE_TURN_TTL_SECONDS=86400
-FILTER_BROWSER_UNSAFE_TURN_URLS=true
+APP_IMAGE=crpi-6yrxqnyn3y05zbgq.cn-qingdao.personal.cr.aliyuncs.com/patrickcmh/patrick-im:latest
+APP_PORT_BIND=127.0.0.1:3456:3456
+ALLOWED_ORIGINS=http://localhost:3456,http://127.0.0.1:3456
+SESSION_SECRET=change-this-before-production
+ICE_PROVIDER=stun-only
 ```
 
-`ALLOWED_ORIGINS` supports multiple values separated by commas.
-
-### `.env.local`
-
-This file is only used by your local release script. It stays on your machine and is ignored by Git.
-
-Typical example:
-
-```env
-DEPLOY_SERVER_HOST=your-server-ip-or-domain
-DEPLOY_SERVER_PORT=22
-DEPLOY_SERVER_USER=root
-DEPLOY_SERVER_PASSWORD=your-ssh-password
-DEPLOY_PROJECT_DIR=/home/patrick-im
-
-ACR_REGISTRY=your-registry.example.com
-IMAGE_REPO=your-registry.example.com/your-namespace/patrick-im
-ACR_USERNAME=your-registry-username
-ACR_PASSWORD=your-registry-password
-
-PLATFORMS=linux/amd64
-RUST_TARGET=x86_64-unknown-linux-musl
-PUSH_LATEST=true
-```
-
-### One-command release
-
-Make sure the local machine has:
-
-- Docker
-- Rust toolchain
-- Zig
-- `cargo-zigbuild`
-- Node.js / npm
-- `sshpass`
-
-First-time setup:
+Then just start it:
 
 ```bash
-rustup target add x86_64-unknown-linux-musl
-cargo install cargo-zigbuild
+docker compose pull
+docker compose up -d
 ```
 
-Then every release is:
+Open:
+
+- `http://127.0.0.1:3456`
+- `http://localhost:3456`
+
+### Common adjustments
+
+- Run `docker login` first if your registry requires authentication
+- Change `APP_PORT_BIND` to `3456:3456` if you want LAN devices to access it
+- Change `ALLOWED_ORIGINS` to your `https://your-domain.com` before real deployment
+- Change `ICE_PROVIDER` to `cloudflare` or `static` if you want better public-network connectivity
+- Change `APP_IMAGE` if you build and publish your own image
+
+### Data and logs
+
+`docker-compose.yaml` mounts a named volume called `patrick-im-diagnostics` so diagnostics survive container recreation.
+
+Useful checks:
 
 ```bash
-bash ./deploy-local.sh
+docker compose ps
+docker compose logs -f app
+curl http://127.0.0.1:3456/healthz
 ```
+
+Maintainer-specific release scripts and private ops workflows are intentionally kept out of the public repository. The public repo only documents the Compose-based runtime path for users.
 
 ## ICE / TURN modes
 

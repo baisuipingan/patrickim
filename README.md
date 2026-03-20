@@ -64,11 +64,10 @@
 .
 ├── src/                    # Rust 后端
 ├── frontend/               # React 前端
-├── deploy-local.sh         # 本地一键发版脚本
-├── deploy.sh               # 服务器侧部署脚本
-├── docker-compose.yml      # 服务器容器编排
+├── Dockerfile              # 运行镜像构建文件
+├── docker-compose.yaml     # Docker Compose 体验入口
 ├── .env.example            # 服务运行配置模板
-└── .env.local.example      # 本地发版私密配置模板
+└── deploy/runtime-rootfs/  # scratch 运行时根目录
 ```
 
 ## 本地开发
@@ -103,92 +102,60 @@ cargo run
 - `http://127.0.0.1:3456`
 - `http://localhost:3456`
 
-## 生产部署
+## Docker Compose 快速体验
 
-当前仓库默认采用“本机构建，服务器拉镜像”的工作流：
+公开仓库面向体验用户的主入口就是 `docker-compose.yaml`。
+你可以把它理解成“拉公开镜像 + 用 `.env` 注入运行参数”。
 
-- 本机构建前端静态资源
-- 本机使用 `cargo zigbuild` 交叉编译 Linux 二进制
-- 本机打 Docker 镜像并推送镜像仓库
-- 服务器只执行 `docker compose pull` 和 `docker compose up -d`
-
-先准备两个配置文件：
+先准备运行配置：
 
 ```bash
 cp .env.example .env
-cp .env.local.example .env.local
 ```
 
-### `.env`
-
-这个文件是服务运行配置，发版时会同步到服务器。
-
-常见写法：
+默认的 `.env.example` 已经可以直接本机体验，至少包含这些值：
 
 ```env
-APP_IMAGE=your-registry.example.com/your-namespace/patrick-im:latest
-APP_PULL_POLICY=always
-
-ALLOWED_ORIGINS=https://your-domain.com
-SESSION_SECRET=替换成固定随机字符串
-SESSION_TTL_SECONDS=2592000
-
-ICE_PROVIDER=cloudflare
-STUN_URLS=stun:stun.cloudflare.com:3478
-CLOUDFLARE_TURN_KEY_ID=your-turn-key-id
-CLOUDFLARE_TURN_API_TOKEN=your-turn-api-token
-CLOUDFLARE_TURN_TTL_SECONDS=86400
-FILTER_BROWSER_UNSAFE_TURN_URLS=true
+APP_IMAGE=crpi-6yrxqnyn3y05zbgq.cn-qingdao.personal.cr.aliyuncs.com/patrickcmh/patrick-im:latest
+APP_PORT_BIND=127.0.0.1:3456:3456
+ALLOWED_ORIGINS=http://localhost:3456,http://127.0.0.1:3456
+SESSION_SECRET=change-this-before-production
+ICE_PROVIDER=stun-only
 ```
 
-`ALLOWED_ORIGINS` 支持多个域名，用英文逗号分隔。
-
-### `.env.local`
-
-这个文件只给你本机发版脚本使用，不会上服务器，也不会提交到 Git。
-
-常见写法：
-
-```env
-DEPLOY_SERVER_HOST=your-server-ip-or-domain
-DEPLOY_SERVER_PORT=22
-DEPLOY_SERVER_USER=root
-DEPLOY_SERVER_PASSWORD=your-ssh-password
-DEPLOY_PROJECT_DIR=/home/patrick-im
-
-ACR_REGISTRY=your-registry.example.com
-IMAGE_REPO=your-registry.example.com/your-namespace/patrick-im
-ACR_USERNAME=your-registry-username
-ACR_PASSWORD=your-registry-password
-
-PLATFORMS=linux/amd64
-RUST_TARGET=x86_64-unknown-linux-musl
-PUSH_LATEST=true
-```
-
-### 一键发版
-
-确保本机已经安装：
-
-- Docker
-- Rust toolchain
-- Zig
-- `cargo-zigbuild`
-- Node.js / npm
-- `sshpass`
-
-首次使用可以执行：
+然后直接启动：
 
 ```bash
-rustup target add x86_64-unknown-linux-musl
-cargo install cargo-zigbuild
+docker compose pull
+docker compose up -d
 ```
 
-之后每次发版只需要：
+启动后访问：
+
+- `http://127.0.0.1:3456`
+- `http://localhost:3456`
+
+### 常见调整项
+
+- 如果你的镜像仓库需要认证，先执行 `docker login`
+- 如果你想让局域网其他设备访问，把 `APP_PORT_BIND` 改成 `3456:3456`
+- 如果你要正式部署到域名，把 `ALLOWED_ORIGINS` 改成你的 `https://域名`
+- 如果你要在公网环境下改善连通性，把 `ICE_PROVIDER` 改成 `cloudflare` 或 `static`
+- 如果你自己构建镜像，把 `APP_IMAGE` 改成你的镜像地址
+
+### 数据与日志
+
+`docker-compose.yaml` 默认挂了一个名为 `patrick-im-diagnostics` 的 volume，用来持久化诊断目录。
+
+可以直接查看容器状态：
 
 ```bash
-bash ./deploy-local.sh
+docker compose ps
+docker compose logs -f app
+curl http://127.0.0.1:3456/healthz
 ```
+
+维护者自己的发版脚本和私有运维流程不再作为公开仓库文档的一部分；公开仓库只保留用户可直接运行的 Compose 入口。
 
 ## ICE / TURN 模式
 
