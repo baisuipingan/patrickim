@@ -25,23 +25,6 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-/// 生成适合写入文件名的安全片段，避免特殊字符污染路径。
-pub(crate) fn sanitize_filename_component(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect::<String>();
-
-    if sanitized.is_empty() {
-        "unknown".to_string()
-    } else {
-        sanitized
-    }
-}
-
 /// 读取逗号分隔环境变量并去掉空白与空项。
 pub(crate) fn split_csv(key: &str) -> Vec<String> {
     env::var(key)

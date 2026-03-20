@@ -8,7 +8,6 @@ services:
       - "${APP_PORT_BIND:-127.0.0.1:3456:3456}"
     environment:
       APP_PORT: 3456
-      DIAGNOSTICS_DIR: /app/diagnostics
       RUST_LOG: ${RUST_LOG:-info}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       SESSION_SECRET: ${SESSION_SECRET:-}
@@ -22,8 +21,3 @@ services:
       CLOUDFLARE_TURN_API_TOKEN: ${CLOUDFLARE_TURN_API_TOKEN:-}
       CLOUDFLARE_TURN_TTL_SECONDS: ${CLOUDFLARE_TURN_TTL_SECONDS:-86400}
       FILTER_BROWSER_UNSAFE_TURN_URLS: ${FILTER_BROWSER_UNSAFE_TURN_URLS:-true}
-    volumes:
-      - patrick-im-diagnostics:/app/diagnostics
-
-volumes:
-  patrick-im-diagnostics:

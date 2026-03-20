@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::State,
     http::{
         header::{self},
         HeaderMap, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use serde_json::Value;
@@ -17,7 +17,6 @@ use tracing::error;
 
 use crate::{
     app::AppContext,
-    diagnostics::post_diagnostics,
     ice::build_ice_config,
     session::{build_session_cookie, existing_or_new_session},
     static_files::static_handler,
@@ -33,10 +32,6 @@ pub(crate) fn build_router(context: Arc<AppContext>) -> Router {
         .route("/api/rooms", get(list_rooms))
         .route("/api/session", get(get_session))
         .route("/api/ice", get(get_ice_config))
-        .route(
-            "/api/diagnostics",
-            post(post_diagnostics).layer(DefaultBodyLimit::max(256 * 1024)),
-        )
         .route("/ws", get(ws_handler))
         .fallback(get(static_handler))
         .with_state(context)

@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | [简体中文](./README.zh-CN.md)
 
-`patrick-im` 是一个以 WebRTC 为核心的点对点通信项目，支持匿名入房、文本聊天、文件传输、音视频通话与屏幕共享。当前主分支基于 `Rust + Axum + React`，服务端保持轻量，只负责匿名 session、房间信令、ICE/TURN 配置和诊断上报。
+`patrick-im` 是一个以 WebRTC 为核心的点对点通信项目，支持匿名入房、文本聊天、文件传输、音视频通话与屏幕共享。当前主分支基于 `Rust + Axum + React`，服务端保持轻量，只负责匿名 session、房间信令和 ICE/TURN 配置。
 
 ## 当前状态
 
@@ -20,7 +20,7 @@
 - 摄像头、麦克风可开关的音视频通话
 - 通话中的屏幕共享
 - 局域网优先直连，公网场景自动尝试 STUN / TURN
-- 前后端诊断留档，便于排查连接不稳和协商异常
+- 前端控制台诊断日志，便于排查连接不稳和协商异常
 - 聊天历史优先保存在浏览器本地
 
 ## 架构说明
@@ -30,7 +30,6 @@
 - 签发和续期匿名 session cookie
 - 维护房间成员和 WebSocket 信令
 - 提供 `/api/ice` 给前端建立 WebRTC
-- 接收 `/api/diagnostics` 诊断报告
 
 ### 服务端不负责什么
 
@@ -66,8 +65,7 @@
 ├── frontend/               # React 前端
 ├── Dockerfile              # 运行镜像构建文件
 ├── docker-compose.yaml     # Docker Compose 体验入口
-├── .env.example            # 服务运行配置模板
-└── deploy/runtime-rootfs/  # scratch 运行时根目录
+└── .env.example            # 服务运行配置模板
 ```
 
 ## 本地开发
@@ -143,9 +141,7 @@ docker compose up -d
 - 如果你要在公网环境下改善连通性，把 `ICE_PROVIDER` 改成 `cloudflare` 或 `static`
 - 如果你自己构建镜像，把 `APP_IMAGE` 改成你的镜像地址
 
-### 数据与日志
-
-`docker-compose.yaml` 默认挂了一个名为 `patrick-im-diagnostics` 的 volume，用来持久化诊断目录。
+### 日志与排查
 
 可以直接查看容器状态：
 
@@ -202,16 +198,14 @@ TURN_CREDENTIAL=your-password
 - `GET /api/session`
 - `GET /api/ice`
 - `GET /api/rooms`
-- `POST /api/diagnostics`
 - `GET /ws`
-
-如果你启用了前端诊断上报，服务端会把报告写入 `diagnostics/` 目录。
 
 ## 说明
 
 - 当前主线已经移除 Go 后端
 - 前端静态资源会被打包进后端发布产物
 - Docker 运行镜像是最小化运行镜像，要求构建产物先在本地准备好
+- 前端诊断信息只保留在浏览器控制台，不再上传到服务端
 
 ## License
 

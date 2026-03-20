@@ -3,7 +3,6 @@
 use std::{
     env,
     net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -22,7 +21,6 @@ pub(crate) struct AppConfig {
     pub(crate) filter_browser_unsafe_turn_urls: bool,
     pub(crate) session_secret: Arc<Vec<u8>>,
     pub(crate) session_ttl_seconds: u64,
-    pub(crate) diagnostics_dir: PathBuf,
 }
 
 /// ICE 服务来源。
@@ -60,9 +58,6 @@ impl AppConfig {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(30 * 24 * 60 * 60);
-        let diagnostics_dir = env::var("DIAGNOSTICS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("diagnostics"));
         let session_secret = env::var("SESSION_SECRET")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -135,7 +130,6 @@ impl AppConfig {
             filter_browser_unsafe_turn_urls,
             session_secret: Arc::new(session_secret.into_bytes()),
             session_ttl_seconds,
-            diagnostics_dir,
         }
     }
 

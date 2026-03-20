@@ -1,24 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { fetchSession } from '../constants/config';
 
-const STORAGE_KEY = 'patrick-im-pending-diagnostics';
 const MAX_EVENTS = 200;
 const MAX_STATS_SAMPLES = 32;
-const MAX_PENDING_REPORTS = 5;
 const DEFAULT_FLUSH_DELAY_MS = 4000;
-const STALE_TRANSIENT_REPORT_MAX_AGE_MS = 2 * 60 * 1000;
-const TRANSIENT_REPORT_REASONS = new Set(['ws_closed', 'ws_closed_repeatedly']);
-let sessionRefreshPromise = null;
-
-async function refreshAnonymousSession() {
-    if (!sessionRefreshPromise) {
-        sessionRefreshPromise = fetchSession().finally(() => {
-            sessionRefreshPromise = null;
-        });
-    }
-
-    return sessionRefreshPromise;
-}
 
 function makeScopeId(prefix = 'diag') {
     const random = Math.random().toString(36).slice(2, 10);
@@ -29,63 +13,6 @@ function pushCapped(list, value, limit) {
     list.push(value);
     if (list.length > limit) {
         list.splice(0, list.length - limit);
-    }
-}
-
-function readPendingReports() {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return [];
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-}
-
-function writePendingReports(reports) {
-    try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(reports.slice(-MAX_PENDING_REPORTS)));
-    } catch {
-        // 忽略本地存储失败，避免影响主流程
-    }
-}
-
-function shouldDropPendingReport(report) {
-    if (!report || typeof report !== 'object') {
-        return true;
-    }
-
-    if (!TRANSIENT_REPORT_REASONS.has(report.reason)) {
-        return false;
-    }
-
-    const endedAt = typeof report.endedAt === 'number' ? report.endedAt : 0;
-    if (!endedAt) {
-        return false;
-    }
-
-    return Date.now() - endedAt > STALE_TRANSIENT_REPORT_MAX_AGE_MS;
-}
-
-async function postDiagnostics(report, keepalive = false, allowSessionRefresh = true) {
-    const response = await fetch('/api/diagnostics', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(report),
-        keepalive
-    });
-
-    if (response.status === 401 && allowSessionRefresh && !keepalive) {
-        await refreshAnonymousSession();
-        return postDiagnostics(report, keepalive, false);
-    }
-
-    if (!response.ok) {
-        throw new Error(`Diagnostics upload failed: ${response.status}`);
     }
 }
 
@@ -160,12 +87,30 @@ function createScope(scopeType = 'app', metadata = {}) {
         scopeType,
         metadata,
         startedAt: Date.now(),
-        uploadCount: 0,
         events: [],
         statsSamples: [],
         issueKeys: new Set(),
         pendingReason: ''
     };
+}
+
+function printDiagnosticsReport(report) {
+    const title = `[patrick-im diagnostics] ${report.reason || 'report'} (${report.callId})`;
+
+    if (typeof console.groupCollapsed === 'function') {
+        console.groupCollapsed(title);
+        console.log('context:', report.context);
+        console.log('issueKeys:', report.issueKeys);
+        console.log('events:', report.events);
+        console.log('statsSamples:', report.statsSamples);
+        if (report.extra && Object.keys(report.extra).length > 0) {
+            console.log('extra:', report.extra);
+        }
+        console.groupEnd();
+        return;
+    }
+
+    console.warn(title, report);
 }
 
 export function useDiagnostics({ getContext }) {
@@ -196,12 +141,6 @@ export function useDiagnostics({ getContext }) {
         return scopeRef.current;
     }, []);
 
-    const stashPendingReport = useCallback((report) => {
-        const pending = readPendingReports();
-        pending.push(report);
-        writePendingReports(pending);
-    }, []);
-
     const buildReport = useCallback((reason, extra = {}) => {
         const scope = scopeRef.current;
         if (!scope) {
@@ -213,7 +152,6 @@ export function useDiagnostics({ getContext }) {
             startedAt: scope.startedAt,
             endedAt: Date.now(),
             reason,
-            uploadCount: scope.uploadCount + 1,
             context: {
                 ...(getContext ? getContext() : {}),
                 scopeType: scope.scopeType,
@@ -248,18 +186,10 @@ export function useDiagnostics({ getContext }) {
             return false;
         }
 
-        try {
-            await postDiagnostics(report, options.keepalive === true);
-            resetScope();
-            return true;
-        } catch (error) {
-            console.warn('Failed to upload diagnostics report:', error);
-            scope.uploadCount += 1;
-            stashPendingReport(report);
-            resetScope();
-            return false;
-        }
-    }, [buildReport, clearFlushTimer, resetScope, stashPendingReport]);
+        printDiagnosticsReport(report);
+        resetScope();
+        return true;
+    }, [buildReport, clearFlushTimer, resetScope]);
 
     const flushIfIssues = useCallback(async (reason = 'issue_flush', options = {}) => {
         if (!scopeRef.current || scopeRef.current.issueKeys.size === 0) {
@@ -278,7 +208,7 @@ export function useDiagnostics({ getContext }) {
         clearFlushTimer();
         flushTimerRef.current = setTimeout(() => {
             const pendingReason = scopeRef.current?.pendingReason || reason;
-            flush(pendingReason, { extra: { trigger: 'scheduled' } });
+            void flush(pendingReason, { extra: { trigger: 'scheduled' } });
         }, delayMs);
     }, [clearFlushTimer, flush]);
 
@@ -309,6 +239,8 @@ export function useDiagnostics({ getContext }) {
             level: options.level || 'warn',
             data
         }, MAX_EVENTS);
+
+        console.warn(`[patrick-im diagnostics] ${issueKey}`, data);
 
         if (options.flush === 'immediate') {
             void flush(options.reason || issueKey, options.flushOptions || {});
@@ -351,36 +283,11 @@ export function useDiagnostics({ getContext }) {
         }
     }, [ensureScope]);
 
-    const retryPendingReports = useCallback(async () => {
-        const pending = readPendingReports();
-        if (pending.length === 0) {
-            return 0;
-        }
-
-        const remaining = [];
-        let uploadedCount = 0;
-
-        for (const report of pending) {
-            if (shouldDropPendingReport(report)) {
-                continue;
-            }
-
-            try {
-                await postDiagnostics(report);
-                uploadedCount += 1;
-            } catch (error) {
-                console.warn('Failed to replay pending diagnostics report:', error);
-                remaining.push(report);
-            }
-        }
-
-        writePendingReports(remaining);
-        return uploadedCount;
-    }, []);
+    const retryPendingReports = useCallback(async () => 0, []);
 
     useEffect(() => () => {
         if (scopeRef.current?.issueKeys.size) {
-            void flush('page_unload', { keepalive: true });
+            void flush('page_unload');
         } else {
             clearFlushTimer();
         }

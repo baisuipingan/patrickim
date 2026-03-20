@@ -625,20 +625,6 @@ function ChatApp() {
         };
     }, []);
 
-    useEffect(() => {
-        if (!sessionReady) {
-            return;
-        }
-
-        diagnostics.retryPendingReports().then((count) => {
-            if (count > 0) {
-                diagnostics.recordEvent('pending_diagnostics_replayed', {
-                    count
-                });
-            }
-        });
-    }, [sessionReady, diagnostics]);
-
     const joinRoom = (roomId, currentUserId = myIdRef.current) => {
         if (!roomId.trim() || !currentUserId) {
             return;

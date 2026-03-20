@@ -34,7 +34,7 @@ export const CALL_MESSAGE_TYPES = {
  * @param {Function} options.log - 日志函数
  * @param {string} options.myId - 当前用户 ID
  * @param {Function} options.getDisplayName - 获取显示名称的函数
- * @param {Object} options.diagnostics - 诊断上报对象
+ * @param {Object} options.diagnostics - 前端诊断记录对象
  */
 export function useVideoCall({ peersRef, sendSignal, log, myId, getDisplayName, diagnostics }) {
     // 通话状态

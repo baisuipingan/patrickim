@@ -3,7 +3,6 @@
 
 mod app;
 mod config;
-mod diagnostics;
 mod ice;
 mod routes;
 mod session;

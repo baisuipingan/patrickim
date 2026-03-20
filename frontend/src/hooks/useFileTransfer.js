@@ -39,7 +39,7 @@ const FILE_PICKER_ABORT_ERROR_NAMES = new Set(['AbortError', 'NotAllowedError', 
  * @param {Function} params.getDisplayName - 获取显示名称函数
  * @param {Object} params.blobUrlsRef - Blob URLs 引用，用于清理
  * @param {string|null} params.activeUser - 当前私聊用户 ID（null 表示广播）
- * @param {Object} params.diagnostics - 诊断上报对象
+ * @param {Object} params.diagnostics - 前端诊断记录对象
  * @returns {Object} 文件传输相关的状态和方法
  */
 export function useFileTransfer({ log, addChat, patchChatMessages, peersRef, myId, getDisplayName, blobUrlsRef, activeUser, diagnostics }) {

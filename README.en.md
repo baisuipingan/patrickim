@@ -2,7 +2,7 @@
 
 [English](./README.en.md) | [简体中文](./README.zh-CN.md)
 
-`patrick-im` is a WebRTC-first peer-to-peer communication app with anonymous room entry, text chat, file transfer, audio/video calling, and screen sharing. The current `main` branch is built with `Rust + Axum + React`. The server is intentionally lightweight and is only responsible for anonymous session issuance, signaling, ICE/TURN configuration, and diagnostics ingestion.
+`patrick-im` is a WebRTC-first peer-to-peer communication app with anonymous room entry, text chat, file transfer, audio/video calling, and screen sharing. The current `main` branch is built with `Rust + Axum + React`. The server is intentionally lightweight and is only responsible for anonymous session issuance, signaling, and ICE/TURN configuration.
 
 ## Status
 
@@ -20,7 +20,7 @@ If you are coming from the older Go implementation, use `main-go` for historical
 - Audio/video calling with camera and microphone toggles
 - Screen sharing during active calls
 - LAN-first connectivity with STUN / TURN fallback for public networks
-- Frontend and backend diagnostics for troubleshooting unstable sessions
+- Frontend console diagnostics for troubleshooting unstable sessions
 - Local-first chat history stored in the browser
 
 ## Architecture
@@ -30,7 +30,6 @@ If you are coming from the older Go implementation, use `main-go` for historical
 - Signs and renews anonymous session cookies
 - Maintains room membership and WebSocket signaling
 - Serves `/api/ice` for WebRTC bootstrap
-- Accepts `/api/diagnostics` reports
 
 ### What the server does not do
 
@@ -66,8 +65,7 @@ Under healthy network conditions, chat, files, and media stay on direct P2P chan
 ├── frontend/               # React frontend
 ├── Dockerfile              # Runtime image build file
 ├── docker-compose.yaml     # Docker Compose entrypoint
-├── .env.example            # Runtime config template
-└── deploy/runtime-rootfs/  # Rootfs used by the scratch runtime image
+└── .env.example            # Runtime config template
 ```
 
 ## Local development
@@ -143,9 +141,7 @@ Open:
 - Change `ICE_PROVIDER` to `cloudflare` or `static` if you want better public-network connectivity
 - Change `APP_IMAGE` if you build and publish your own image
 
-### Data and logs
-
-`docker-compose.yaml` mounts a named volume called `patrick-im-diagnostics` so diagnostics survive container recreation.
+### Logs and troubleshooting
 
 Useful checks:
 
@@ -202,16 +198,14 @@ Available endpoints:
 - `GET /api/session`
 - `GET /api/ice`
 - `GET /api/rooms`
-- `POST /api/diagnostics`
 - `GET /ws`
-
-When frontend diagnostics are enabled, the server writes reports into the `diagnostics/` directory.
 
 ## Notes
 
 - The Go backend has been removed from the active mainline
 - Static frontend assets are embedded into the backend release artifact
 - The runtime image is intentionally minimal and expects build artifacts to be prepared locally
+- Frontend diagnostics stay in the browser console and are no longer uploaded to the server
 
 ## License
 
