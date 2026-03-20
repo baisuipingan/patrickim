@@ -1,6 +1,9 @@
 //! WebRTC 诊断数据的接收与落盘。
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use axum::{
     extract::State,
@@ -152,7 +155,7 @@ pub(crate) async fn post_diagnostics(
 }
 
 fn build_diagnostics_path(
-    diagnostics_dir: &PathBuf,
+    diagnostics_dir: &Path,
     saved_at: u64,
     report_id: &str,
     session_client_id: &str,

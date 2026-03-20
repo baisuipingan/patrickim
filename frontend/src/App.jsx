@@ -653,6 +653,9 @@ function ChatApp() {
         }
 
         cleanupConnections();
+        activeUserRef.current = null;
+        firstUnreadRef.current = null;
+        setActiveUser(null);
 
         const history = loadChatHistory(roomId);
         setChatHistory(history);

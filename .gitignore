@@ -15,4 +15,7 @@ patrick-im-server.exe
 .env.local
 .env.*
 !.env.example
-!.env.local.example
+*.pem
+deploy-local.sh
+deploy.sh
+.env.local.example
